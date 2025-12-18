@@ -39,7 +39,7 @@ jobs:
         ruff check --exit-zero --statistics
     - name: Install project
       run: |
-        pip install .
+        pip install .[dev]
     - name: Run tests
       run: |
         pytest

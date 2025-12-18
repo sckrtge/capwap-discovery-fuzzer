@@ -60,7 +60,7 @@ pip install .[test]
 
 ```bash
 capwap_discovery_fuzzer fuzz \
-  --pcap ./src/pcap/sample_discovery_request.pcap \
+  --pcap ./pcap/sample_discovery_request.pcap \
   --ac-ip 192.168.1.1 \
   --rounds 100
 ```

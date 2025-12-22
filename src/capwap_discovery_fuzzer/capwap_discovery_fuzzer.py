@@ -3,19 +3,26 @@ import socket
 from scapy.all import rdpcap
 import capwap_discovery_fuzzer.errors as errors
 from capwap_discovery_fuzzer.utils import hexdump
-import random as rd
+import random
 import time
+import json
+from pathlib import Path
 
-REQUESTS_PER_SECOND = 1
+REQUESTS_PER_SECOND = 0
 
 class CAPWAPDiscoveryFuzzer:
-    def __init__(self, ac_ip: str, ac_port: int = 5246, timeout: float = 3.0):
+    def __init__(self, ac_ip: str, ac_port: int = 5246, timeout: float = 3.0, seed: int | None = None):
         self.ac_ip = ac_ip
         self.ac_port = ac_port
         self.timeout = timeout
 
         self.sock = None
         self.sequence = 0
+        self._rng = random.Random()
+        self.seed = seed
+
+        if seed is not None:
+            self._rng.seed(seed)
 
     def _open_socket(self):
         if self.sock is not None:
@@ -79,7 +86,8 @@ class CAPWAPDiscoveryFuzzer:
             return None
         finally:
             self._close_socket()
-            time.sleep(1 / REQUESTS_PER_SECOND)
+            if REQUESTS_PER_SECOND > 0:
+                time.sleep(1 / REQUESTS_PER_SECOND)
 
 
 
@@ -140,17 +148,21 @@ class CAPWAPDiscoveryFuzzer:
         Generate fuzzed variants of a single message element.
         Returns a list of mutated elements.
         """
+
         element_type, element_length, element_value = element
         fuzz = []
 
-        fuzz.append((element_type, element_length, element_value))
+        # fuzz.append((element_type, element_length, element_value))
 
-        # length mutation
-        fuzz.append((element_type, min(1 << 16, element_length + 1), element_value))
-        fuzz.append((element_type, max(element_length - 1, 0), element_value))
+        # # length mutation
+        # fuzz.append((element_type, min(1 << 16, element_length + 1), element_value))
+        # fuzz.append((element_type, max(element_length - 1, 0), element_value))
 
-        random_length = rd.randrange(0, 1 << 16)
-        fuzz.append((element_type, random_length, element_value))
+        # random_length = self._rngrandrange(0, 1 << 16)
+        # fuzz.append((element_type, random_length, element_value))
+
+        random_value = self._rng.getrandbits(element_length * 8).to_bytes(element_length, byteorder='big')
+        fuzz.append((element_type, element_length, random_value))
 
         return fuzz
 
@@ -181,6 +193,29 @@ class CAPWAPDiscoveryFuzzer:
         """
         bytes_elements = self._build_message_elements(message_elements)
         return capwap_header + control_header + bytes_elements
+    
+
+    def save_discovery_response(self, payload: bytes, resp: bytes | None, result: str, element_type: int) -> None:
+        path = Path("discovery_messages.json")
+
+        if path.exists():
+            with open(path) as f:
+                cases = json.load(f)
+        else:
+            cases = []
+
+        cases.append({
+            "timestamp": time.time_ns(),
+            "seed": self.seed,
+            "result": result,
+            "element_type": element_type,
+            "request_hex": payload.hex(),
+            "response_hex": resp.hex() if resp else None
+        })
+
+        with open(path, "w") as f:
+            json.dump(cases, f, indent=2)
+
 
     def simple_fuzzing_with_pcap(
         self,
@@ -204,12 +239,15 @@ class CAPWAPDiscoveryFuzzer:
                 new_elements[i] = fuzzed_now_element
                 new_payload = self.rebuild_capwap_control_message(capwap_header, control_header, new_elements)
                 resp = self.send_discovery_request(new_payload)
+                result = ''
                 if resp is None:
-                    status['timeout'] += 1
+                    result = 'timeout'
                 elif self.is_discovery_response(resp):
-                    status['valid'] += 1
+                    result = 'valid'
                 else:
-                    status['invalid'] += 1
+                    result = 'invalid'
+                self.save_discovery_response(payload=new_payload, resp=resp, result=result, element_type=fuzzed_now_element[0])
+                status[result] += 1
                 status['total'] += 1
         return status
 

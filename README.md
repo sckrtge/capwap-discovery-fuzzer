@@ -59,19 +59,12 @@ pip install .[test]
 ### Basic fuzzing run
 
 ```bash
-capwap_discovery_fuzzer fuzz \
-  --pcap ./pcap/sample_discovery_request.pcap \
-  --ac-ip 192.168.1.1 \
-  --rounds 100
-```
-
-### With fixed random seed
-
-```bash
-capwap_discovery_fuzzer fuzz \
-  --pcap sample.pcap \
-  --ac-ip 192.168.1.1 \
-  --rounds 50 \
+# run in ./capwap_discovery_fuzzer
+python -m capwap_discovery_fuzzer \
+  --pcap ./pcaps/sample_discovery_request.pcap \
+  --ac-ip 192.168.10.128 \
+  --ac-port 5246 \
+  --rounds 1 \
   --seed 1337
 ```
 

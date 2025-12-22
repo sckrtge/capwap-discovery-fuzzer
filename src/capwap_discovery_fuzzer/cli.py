@@ -8,7 +8,7 @@ from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
-
+import time
 
 app = typer.Typer()
 console = Console()
@@ -25,12 +25,12 @@ def fuzz(
     ),
     ac_ip: str = typer.Option(
         ...,
-        '--ac_ip',
+        '--ac-ip',
         help='Target AC IP address'
     ),
     ac_port: int = typer.Option(
         5246,
-        '--ac_port',
+        '--ac-port',
         help='Target AC control port(default 5246)'
     ),
     rounds: int = typer.Option(
@@ -58,13 +58,13 @@ def fuzz(
     console.print(f'[+] Target AC : {ac_ip}:{ac_port}')
     console.print(f'[+] Rounds    : {rounds}')
     if seed is not None:
-        rd.seed(seed)
         console.print(f"[*] Using random seed: {seed}")
 
     fuzzer = CAPWAPDiscoveryFuzzer(
         ac_ip=ac_ip,
         ac_port=ac_port,
-        timeout=timeout
+        timeout=timeout,
+        seed=seed
     )
     with Progress(
         SpinnerColumn(),
@@ -94,6 +94,7 @@ def fuzz(
                 progress.console.print(f'[red][-] Round {i+1} error : {e}[/red]')
             finally:
                 progress.advance(task, 1)
+                time.sleep(2)
         table = Table(title="CAPWAP Fuzzing Summary")
         table.add_column("Type", style="bold")
         table.add_column("Count", justify="right")

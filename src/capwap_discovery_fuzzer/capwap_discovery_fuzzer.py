@@ -7,7 +7,8 @@ import random
 import time
 import json
 from pathlib import Path
-from capwap_discovery_fuzzer.Payload import *
+from capwap_discovery_fuzzer.payload_creater import *
+from capwap_discovery_fuzzer.payload_fuzzer import *
 from scapy.config import conf
 
 MUTATUION_COUNT = 10
@@ -61,12 +62,11 @@ class CAPWAPDiscoveryFuzzer:
         if discovery_response is None:
             logging.info(f"Discovery Response Timeout")
             return False
-        logging.info(f"Discovery Responst: {hexdump(bytes(discovery_response))}")
+        logging.info(f"Discovery Response:\n{hexdump(bytes(discovery_response))}")
         return True
     
     def send_discovery_request(self, discovery_request):
         conf.verb = 0
-        logging.info(f"Discovery Request Hex:\n{hexdump(bytes(discovery_request))}\n")
         sport = random.randint(20000,60000)
         pkt = IP(dst=self.ac_ip) / UDP(sport=sport, dport=self.ac_port) / discovery_request # type: ignore
         logging.info(f"Send Discovery Request:\n{pkt.show(dump=True)}\n")
@@ -74,37 +74,54 @@ class CAPWAPDiscoveryFuzzer:
         resp = sr1(pkt, timeout=self.timeout)
         # time.sleep(1)
         return resp
-        
+    
     def fuzzing(
         self,
         pcap_path: str | None,
-
     ) -> dict[str, int]:
-        """
-        run a simple fuzzing with pcap
-        """
-        
+
         status = {
             'timeout': 0,
             'valid': 0,
             'total': 0
         }
+
         creator = Payload_Creator()
-        payload = b''
+
         if pcap_path is not None:
-            payload = bytes(self.load_request_from_pcap(pcap_path))
-            logging.info(f"PCAP Discovery Request: {parse_discovery_request(payload).show(dump=True)}")
-            # logging.info(f"PCAP is:\n{hexdump(payload)}")
-        for o in range(0, MUTATUION_COUNT):
-            if pcap_path is not None:
-                send_payload = payload
-            else:
-                send_payload = creator.create_discovery_request(valid=True)
-            resp = self.send_discovery_request(send_payload)
+            base_pkt = parse_discovery_request(
+                bytes(self.load_request_from_pcap(pcap_path))
+            )
+            logging.info(
+                f"PCAP Discovery Request:\n{base_pkt.show(dump=True)}"
+            )
+        else:
+            base_pkt = creator.create_discovery_request(valid=True)
+
+        fuzzer = Payload_Fuzzer(base_pkt)
+
+        fuzz_methods = [
+            fuzzer.fuzz_capwap_header,
+            fuzzer.fuzz_control_header,
+            fuzzer.fuzz_any_tlv_length,
+            fuzzer.fuzz_any_tlv_value,
+            lambda: fuzzer.fuzz_specific_tlv(38),
+            lambda: fuzzer.fuzz_specific_tlv(39),
+            fuzzer.fuzz_duplicate_tlv,
+            fuzzer.fuzz_drop_last_tlv,
+        ]
+
+        for _ in range(MUTATUION_COUNT):
+            mutate = random.choice(fuzz_methods)
+            send_pkt = mutate()
+
+            resp = self.send_discovery_request(send_pkt)
+
             if self.is_discovery_response(resp):
-                result = 'valid'
+                status['valid'] += 1
             else:
-                result = 'timeout'
-            status[result] += 1
+                status['timeout'] += 1
+
             status['total'] += 1
+
         return status

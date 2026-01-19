@@ -172,7 +172,7 @@ class Payload_Creator:
                 )
                 value = value / self.create_board_data(0)
                 value = value / self.create_board_data(1)
-                value = value / self.create_board_data(4)
+                length = len(value)
             elif type == 39: 
                 value = WTPDescriptor(
                     MaxRadio=1,
@@ -181,11 +181,12 @@ class Payload_Creator:
                 )
                 value = value / EncryptionSubElement(
                     Resvd=0,
-                    WBID=0,
+                    WBID=1,
                     EncryptionCapabilities=0
                 )
                 for i in range(0, 3):
                     value = value / self.create_descriptor_sub_element(i)
+                length = len(value)
             elif type == 41: 
                 length = 1 
                 value = random_bytes(length, b"\x00") 
@@ -225,13 +226,14 @@ class Payload_Creator:
         message_elements = elements[0]
         for elem in elements[1:]:
             message_elements = message_elements / elem
-        logging.info(f"Message Elements Len:{len(message_elements)}")
+        logging.info(f"Created Message Elements Len:{len(message_elements)}")
         control_header = self.create_control_header(
             len(message_elements) + 3,
             valid=valid,
         )
         discovery_request = capwap_header / control_header / message_elements
-        logging.info(f"Discovery Request Len:{len(discovery_request)}")
+        logging.info(f"Created Discovery Request Len:{len(discovery_request)}")
+        logging.info(f"Created Discovery Request:\n{discovery_request.show(dump=True)}")
         return discovery_request
 from scapy.all import Packet
 from typing import Optional

@@ -1,11 +1,5 @@
 # CAPWAP Discovery Fuzzer
 
-![PyPI version](https://img.shields.io/pypi/v/capwap-discovery-fuzzer.svg)
-![Python](https://img.shields.io/pypi/pyversions/capwap-discovery-fuzzer)
-![License](https://img.shields.io/pypi/l/capwap-discovery-fuzzer)
-
-Academic CAPWAP Discovery Request / Response fuzzing tool.
-
 This project focuses on **structure-aware fuzzing** of CAPWAP Discovery control messages
 as defined in **RFC 5415**, targeting Access Controllers (ACs) during the WTP discovery phase.
 

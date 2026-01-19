@@ -170,7 +170,7 @@ def fuzz(
         table.add_column("Type", style="bold")
         table.add_column("Count", justify="right")
 
-        for k in ("valid", "invalid", "timeout", "total"):
+        for k in ("valid", "timeout", "total"):
             table.add_row(k, str(total_status[k]))
 
         console.print(table)

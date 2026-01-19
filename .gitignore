@@ -20,6 +20,10 @@ venv/
 
 # Logs / fuzz output
 *.log
+capwap_log/
+
+# Scripts
+*.sh
 
 # PCAP cache or temp
 *.pcap.tmp

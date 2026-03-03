@@ -45,10 +45,7 @@ class Payload_Fuzzer:
             i += 1
         return elems
 
-    def fuzz_any_tlv_length(self) -> Packet:
-        """
-        随机选择一个 TLV，破坏其 Length 字段
-        """
+    def fuzz_any_msg_length(self) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
@@ -60,10 +57,7 @@ class Payload_Fuzzer:
 
         return p
 
-    def fuzz_any_tlv_value(self) -> Packet:
-        """
-        随机选择一个 TLV，破坏其 Value 内容，并同步 Length
-        """
+    def fuzz_any_msg_value(self) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
@@ -77,15 +71,12 @@ class Payload_Fuzzer:
 
         return p
 
-    def fuzz_specific_tlv(self, tlv_type: int) -> Packet:
-        """
-        定向 fuzz 指定 Type 的 TLV
-        """
+    def fuzz_specific_msg(self, msg_type: int) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
         for elem in elems:
-            if elem.Type == tlv_type:
+            if elem.Type == msg_type:
                 new_len = random.randint(0, 256)
                 elem.Value = bytes(random.getrandbits(8) for _ in range(new_len))
                 elem.Length = new_len
@@ -93,10 +84,7 @@ class Payload_Fuzzer:
 
         return p
 
-    def fuzz_duplicate_tlv(self) -> Packet:
-        """
-        复制一个 TLV，并插入到 TLV 链中（制造重复 TLV）
-        """
+    def fuzz_duplicate_msg(self) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
@@ -109,47 +97,36 @@ class Payload_Fuzzer:
 
         return p
 
-    def fuzz_drop_last_tlv(self) -> Packet:
-        """
-        删除最后一个 TLV
-        """
+    def fuzz_drop_last_msg(self) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
         if len(elems) < 2:
             return p
 
-        # 删除最后一个 TLV
         elems[-2].remove_payload()
 
         return p
-    def fuzz_shuffle_tlvs(self) -> Packet:
-        """
-        打乱 Message Element 的顺序
-        """
+    def fuzz_shuffle_msgs(self) -> Packet:
         p = self._clone()
 
         elems = self._iter_message_elements(p)
         if len(elems) < 2:
             return p
 
-        # 找到 TLV 起始前的层（Control Header）
         first = elems[0]
         parent = p
         while parent.payload is not first:
             parent = parent.payload
 
-        # 打乱 TLV 顺序
         random.shuffle(elems)
 
-        # 重新构建 TLV 链
         new_chain = elems[0]
         cur = new_chain
         for e in elems[1:]:
             cur.add_payload(e)
             cur = e
 
-        # 接回报文
         parent.remove_payload()
         parent.add_payload(new_chain)
 

@@ -103,12 +103,13 @@ class CAPWAPDiscoveryFuzzer:
         fuzz_methods = [
             fuzzer.fuzz_capwap_header,
             fuzzer.fuzz_control_header,
-            fuzzer.fuzz_any_tlv_length,
-            fuzzer.fuzz_any_tlv_value,
-            lambda: fuzzer.fuzz_specific_tlv(38),
-            lambda: fuzzer.fuzz_specific_tlv(39),
-            fuzzer.fuzz_duplicate_tlv,
-            fuzzer.fuzz_drop_last_tlv,
+            fuzzer.fuzz_any_msg_length,
+            fuzzer.fuzz_any_msg_value,
+            lambda: fuzzer.fuzz_specific_msg(38),
+            lambda: fuzzer.fuzz_specific_msg(39),
+            fuzzer.fuzz_duplicate_msg,
+            fuzzer.fuzz_drop_last_msg,
+            fuzzer.fuzz_shuffle_msgs
         ]
 
         for _ in range(MUTATUION_COUNT):

@@ -121,7 +121,6 @@ def fuzz(
         seed = int(time.time_ns())
         console.print(f"[*] Using random seed: {seed}")
         logging.info("Generated random seed: %d", seed)
-
     
     # 构造 Fuzzer
     fuzzer = CAPWAPDiscoveryFuzzer(

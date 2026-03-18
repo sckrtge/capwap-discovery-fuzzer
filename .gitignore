@@ -21,6 +21,7 @@ venv/
 # Logs / fuzz output
 *.log
 capwap_log/
+capwap_response_logs/
 
 # Scripts
 *.sh

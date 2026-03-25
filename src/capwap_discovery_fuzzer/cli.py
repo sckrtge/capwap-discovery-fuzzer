@@ -138,12 +138,12 @@ def fuzz(
 
         for i in range(rounds):
             try:
+                # 每轮 fuzzing 返回一条状态，包括 response_type 和 error_type
                 status = fuzzer.fuzzing(pcap_path)
 
                 # 更新总统计
                 for k in ("valid", "timeout", "error", "total"):
                     total_status[k] += status.get(k, 0)
-                # 合并 error_type 统计
                 for etype, count in status.get("error_types", {}).items():
                     total_status["error_types"].setdefault(etype, 0)
                     total_status["error_types"][etype] += count

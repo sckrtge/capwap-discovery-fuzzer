@@ -2,7 +2,6 @@ class CAPWAPFuzzerError(Exception):
     """Base class for all CAPWAP Discovery Fuzzer errors."""
     pass
 
-
 class NoResponseError(CAPWAPFuzzerError):
     def __init__(
         self,
@@ -16,8 +15,15 @@ class NoResponseError(CAPWAPFuzzerError):
         self.ac_port = ac_port
         self.timeout = timeout
 
-
 class InvalidResponseError(CAPWAPFuzzerError):
     def __init__(self, message: str, raw_data: bytes | None = None):
         super().__init__(message)
         self.raw_data = raw_data
+
+# 新增错误类型
+class MissingCapwapHeaderError(InvalidResponseError): pass
+class MissingControlHeaderError(InvalidResponseError): pass
+class UnexpectedMsgTypeError(InvalidResponseError): pass
+class MissingRequiredElementError(InvalidResponseError): pass
+class InvalidRadioInfoError(InvalidResponseError): pass
+class NetworkError(CAPWAPFuzzerError): pass

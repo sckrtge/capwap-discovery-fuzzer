@@ -1,7 +1,8 @@
+# response_parser.py
 from scapy.all import *
 from typing import Dict, Any, Optional
 from .errors import *
-from .request_creater import CAPWAP_Header, Control_Header  # 直接导入，不重复定义
+from .request_creater import CAPWAP_Header, Control_Header  # 从 request_creater 导入
 
 class ResponseType:
     VALID = "valid"
@@ -13,7 +14,7 @@ class ResponseType:
     def all_types():
         return [ResponseType.VALID, ResponseType.ERROR, ResponseType.NO_RESPONSE, ResponseType.UNKNOWN]
 
-# --------------------- Response_MessageElement_Valid ---------------------
+# --------------------- Scapy 层定义 ---------------------
 class Response_MessageElement_Valid(Packet):
     name = "Message Element"
     fields_desc = [
@@ -41,6 +42,7 @@ class ResponseParser:
         split_layers(Control_Header, Response_MessageElement_Valid)
         split_layers(Response_MessageElement_Valid, Response_MessageElement_Valid)
 
+    # 递归解析 Scapy 对象 -> 字典
     def scapy_to_dict(self, pkt) -> dict:
         if not pkt:
             return None
@@ -49,18 +51,14 @@ class ResponseParser:
             d["payload"] = self.scapy_to_dict(pkt.payload)
         return d
 
-    def _parse_elements(self, pkt) -> Optional[Packet]:
-        elements_pkt = None
-        current = pkt.payload if pkt.payload else None
-        last_elem = None
-        while current and isinstance(current, Response_MessageElement_Valid):
-            if elements_pkt is None:
-                elements_pkt = current
-                last_elem = current
-            else:
-                last_elem = last_elem / current
-            current = current.payload
-        return elements_pkt
+    # 递归收集所有 Message Element Type
+    def _collect_types(self, pkt_elem) -> set:
+        types = set()
+        while pkt_elem:
+            if isinstance(pkt_elem, Response_MessageElement_Valid):
+                types.add(pkt_elem.Type)
+            pkt_elem = pkt_elem.payload if hasattr(pkt_elem, "payload") else None
+        return types
 
     def parse_response(self, raw_data: bytes, request_info: Optional[Dict] = None) -> Dict[str, Any]:
         request_info = request_info or {}
@@ -68,10 +66,8 @@ class ResponseParser:
             raise NoResponseError("No response received", request_info.get("ac_ip"), request_info.get("ac_port"))
 
         result: Dict[str, Any] = {
-            "capwap_header": {},
-            "control_header": {},
-            "scapy_pkt": None,
-            "scapy_pkt_obj": None,
+            "scapy_pkt": None,        # 字典化的完整包
+            "scapy_pkt_obj": None,    # Scapy 对象
             "hex_dump": raw_data.hex(),
             "request_info": request_info,
             "response_type": ResponseType.UNKNOWN,
@@ -80,40 +76,35 @@ class ResponseParser:
 
         try:
             self._bind_layers()
+
             # 去掉 IP/UDP 首部
             if raw_data[:20] and raw_data[0] >> 4 == 4:
                 ip_len = (raw_data[0] & 0x0F) * 4
                 raw_data = raw_data[ip_len + 8:]  # UDP header固定8字节
 
             pkt = CAPWAP_Header(raw_data)
-            result["capwap_header"] = pkt[CAPWAP_Header].fields if pkt.haslayer(CAPWAP_Header) else {}
-            result["control_header"] = pkt[Control_Header].fields if pkt.haslayer(Control_Header) else {}
 
-            elements_pkt = self._parse_elements(pkt)
-            full_pkt = pkt
-            if elements_pkt:
-                full_pkt = pkt / elements_pkt
+            # 完整 Scapy 对象
+            result["scapy_pkt_obj"] = pkt
+            result["scapy_pkt"] = self.scapy_to_dict(pkt)
 
-            result["scapy_pkt_obj"] = full_pkt
-            result["scapy_pkt"] = self.scapy_to_dict(full_pkt)
-
-            # 分类逻辑
-            if not result["capwap_header"]:
+            # 基本检查
+            if not pkt.haslayer(CAPWAP_Header):
                 raise MissingCapwapHeaderError("CAPWAP header missing", raw_data)
-            if not result["control_header"]:
+            if not pkt.haslayer(Control_Header):
                 raise MissingControlHeaderError("Control header missing", raw_data)
-            if result["control_header"].get("MsgType") != 2:
-                raise UnexpectedMsgTypeError(f"Unexpected MsgType {result['control_header'].get('MsgType')}", raw_data)
+            if pkt[Control_Header].MsgType != 2:
+                raise UnexpectedMsgTypeError(f"Unexpected MsgType {pkt[Control_Header].MsgType}", raw_data)
 
-            # 必要元素检查：Type 必须包含 1, 4, 10
+            # 必要元素检查：Type 必须都出现 1,4,10
+            elem = pkt[Control_Header].payload
+            present_types = self._collect_types(elem)
             required_types = {1, 4, 10}
-            present_types = set()
-            elem = elements_pkt
-            while elem:
-                present_types.add(elem.Type)
-                elem = elem.payload if isinstance(elem.payload, Response_MessageElement_Valid) else None
-            if not required_types.intersection(present_types):
-                raise MissingRequiredElementError("Required message elements missing (need 1,4,10)", raw_data)
+            if not required_types.issubset(present_types):
+                raise MissingRequiredElementError(
+                    f"Required message elements missing. Present: {present_types}, Required: {required_types}",
+                    raw_data
+                )
 
             result["response_type"] = ResponseType.VALID
             self.stats[ResponseType.VALID] += 1

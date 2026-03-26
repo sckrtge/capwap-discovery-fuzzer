@@ -123,7 +123,6 @@ class CAPWAPDiscoveryFuzzer:
         for i in range(MUTATION_COUNT):
             method = self._rng.choice(fuzz_methods)
             send_pkt = method()
-            send_pkt = base_pkt
             request_info = {"iteration": i+1, "method": getattr(method,"__name__",str(method))}
             try:
                 req_pkt, resp = self.send_discovery_request(send_pkt)

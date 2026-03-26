@@ -10,7 +10,7 @@ from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
 from .errors import *
 
-MUTATION_COUNT = 10
+MUTATION_COUNT = 10  # 可按需求调整
 
 class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
@@ -19,7 +19,6 @@ class CAPWAPDiscoveryFuzzer:
         self.ac_port = ac_port
         self.timeout = timeout
         self.broadcast = broadcast
-        # 如果没传 seed，就用当前时间生成随机 seed
         self.seed = seed if seed is not None else random.SystemRandom().randint(0, 2**32 - 1)
         self._rng = random.Random(self.seed)
 
@@ -49,9 +48,6 @@ class CAPWAPDiscoveryFuzzer:
         return pkt, resp
 
     def _scapy_to_json(self, pkt):
-        """
-        将 scapy Packet 转换为嵌套 JSON 结构
-        """
         if pkt is None:
             return None
         res = {
@@ -100,8 +96,21 @@ class CAPWAPDiscoveryFuzzer:
         logging.info(f"Response Classification: {response_type}, ErrorType: {error_type}")
         return response_type, error_type
 
-    def fuzzing(self, pcap_path: str | None = None):
+    def load_request_from_pcap(self, pcap_path: str) -> bytes:
+        pkts = rdpcap(pcap_path)
+        for pkt in pkts:
+            if pkt.haslayer(UDP) and pkt["UDP"].dport == 5246:
+                return bytes(pkt["UDP"].payload)
+        raise ValueError("No CAPWAP Discovery Request found in pcap!")
+
+    # -------------------- 复合 fuzzing 主方法 --------------------
+    def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3, max_brutal_methods: int = 3):
+        """
+        每轮随机选取若干结构安全 fuzz 方法 + 若干暴力方法
+        暴力方法放最后，可以多选、重复
+        """
         status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
+
         if pcap_path:
             base_pkt = parse_discovery_request(bytes(self.load_request_from_pcap(pcap_path)))
         else:
@@ -109,34 +118,15 @@ class CAPWAPDiscoveryFuzzer:
 
         fuzzer = Payload_Fuzzer(base_pkt)
 
-        # 特定消息 fuzz 方法
+        # -------------------- 结构安全方法 --------------------
         def fuzz_msg_38():
             return fuzzer.fuzz_specific_msg(38)
 
         def fuzz_msg_39():
             return fuzzer.fuzz_specific_msg(39)
 
-        # 暴力 fuzz 方法
-        def brutal_random():
-            return fuzzer.brutal_random_bytes(base_pkt)
-
-        def brutal_insert():
-            return fuzzer.brutal_insert_random_bytes(base_pkt)
-
-        def brutal_delete():
-            return fuzzer.brutal_delete_random_bytes(base_pkt)
-
-        def brutal_shuffle():
-            return fuzzer.brutal_shuffle_bytes(base_pkt)
-
-        def brutal_duplicate():
-            return fuzzer.brutal_duplicate_segments(base_pkt)
-
-        def brutal_reverse():
-            return fuzzer.brutal_reverse_segment(base_pkt)
-
-        # 所有 fuzz 方法列表
-        fuzz_methods = [
+        # 安全的结构性 fuzz 方法（不破坏报文结构）
+        safe_methods = [
             fuzzer.fuzz_capwap_header,
             fuzzer.fuzz_control_header,
             fuzzer.fuzz_any_msg_length,
@@ -147,23 +137,61 @@ class CAPWAPDiscoveryFuzzer:
             fuzzer.fuzz_drop_last_msg,
             fuzzer.fuzz_shuffle_msgs,
             fuzzer.fuzz_capwap_flags,
-            brutal_random,
-            brutal_insert,
-            brutal_delete,
-            brutal_shuffle,
-            brutal_duplicate,
-            brutal_reverse
+        ]
+
+        # -------------------- 暴力方法 --------------------
+        brutal_methods = [
+            fuzzer.brutal_random_bytes,
+            fuzzer.brutal_insert_random_bytes,
+            fuzzer.brutal_delete_random_bytes,
+            fuzzer.brutal_shuffle_bytes,
+            fuzzer.brutal_duplicate_segments,
+            fuzzer.brutal_reverse_segment,
         ]
 
         for i in range(MUTATION_COUNT):
-            method = self._rng.choice(fuzz_methods)
-            send_pkt = method()
-            method_name = getattr(method, "__name__", str(method))
-            request_info = {"iteration": i + 1, "method": method_name}
-            logging.info("Fuzz iteration %d: selected method: %s", i + 1, method_name)
+            pkt = base_pkt.copy()
+            method_chain = []
+
+            # 随机选择结构安全方法
+            num_safe = self._rng.randint(1, min(max_safe_methods, len(safe_methods)))
+            chosen_safe = self._rng.sample(safe_methods, num_safe)
+
+            # 排序：header → length/value → duplicate/drop → shuffle
+            def sort_key(method):
+                name = getattr(method, "__name__", str(method))
+                if "capwap_header" in name or "control_header" in name:
+                    return 0
+                elif "length" in name or "value" in name or "specific_msg" in name or "capwap_flags" in name:
+                    return 1
+                elif "duplicate_msg" in name or "drop_last_msg" in name:
+                    return 2
+                elif "shuffle" in name:
+                    return 3
+                else:
+                    return 4
+            chosen_safe.sort(key=sort_key)
+
+            # 执行结构安全方法
+            for method in chosen_safe:
+                if "fuzz_specific_msg" in str(method):
+                    pkt = method()
+                else:
+                    pkt = method()
+                method_chain.append(getattr(method, "__name__", str(method)))
+
+            # 执行暴力方法
+            num_brutal = self._rng.randint(0, max_brutal_methods)
+            chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)  # 可重复
+            for method in chosen_brutal:
+                pkt = method(pkt)
+                method_chain.append(getattr(method, "__name__", str(method)))
+
+            request_info = {"iteration": i + 1, "method_chain": method_chain}
+            logging.info("Composite Fuzz iteration %d: method chain: %s", i + 1, method_chain)
 
             try:
-                req_pkt, resp = self.send_discovery_request(send_pkt)
+                req_pkt, resp = self.send_discovery_request(pkt)
                 resp_type, error_type = self.classify_discovery_response(req_pkt, resp, request_info)
                 status[resp_type] += 1
                 if resp_type == "error" and error_type:
@@ -171,18 +199,11 @@ class CAPWAPDiscoveryFuzzer:
                     status["error_types"][error_type] += 1
                 status["total"] += 1
             except Exception as e:
-                logging.error(f"Fuzz iteration {i + 1} failed: {e}")
+                logging.error(f"Composite Fuzz iteration {i + 1} failed: {e}")
                 status["error"] += 1
                 status["error_types"].setdefault(type(e).__name__, 0)
                 status["error_types"][type(e).__name__] += 1
                 status["total"] += 1
 
-        logging.info(f"Fuzzing Summary: {status}")
+        logging.info(f"Composite Fuzzing Summary: {status}")
         return status
-
-    def load_request_from_pcap(self, pcap_path: str) -> bytes:
-        pkts = rdpcap(pcap_path)
-        for pkt in pkts:
-            if pkt.haslayer(UDP) and pkt["UDP"].dport == 5246:
-                return bytes(pkt["UDP"].payload)
-        raise ValueError("No CAPWAP Discovery Request found in pcap!")

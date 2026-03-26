@@ -101,43 +101,81 @@ class CAPWAPDiscoveryFuzzer:
         return response_type, error_type
 
     def fuzzing(self, pcap_path: str | None = None):
-        status = {"valid":0,"timeout":0,"error":0,"total":0,"error_types":{}}
+        status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
         if pcap_path:
             base_pkt = parse_discovery_request(bytes(self.load_request_from_pcap(pcap_path)))
         else:
             base_pkt = self.payload_creator.create_discovery_request(valid=True)
 
         fuzzer = Payload_Fuzzer(base_pkt)
+
+        # 特定消息 fuzz 方法
+        def fuzz_msg_38():
+            return fuzzer.fuzz_specific_msg(38)
+
+        def fuzz_msg_39():
+            return fuzzer.fuzz_specific_msg(39)
+
+        # 暴力 fuzz 方法
+        def brutal_random():
+            return fuzzer.brutal_random_bytes(base_pkt)
+
+        def brutal_insert():
+            return fuzzer.brutal_insert_random_bytes(base_pkt)
+
+        def brutal_delete():
+            return fuzzer.brutal_delete_random_bytes(base_pkt)
+
+        def brutal_shuffle():
+            return fuzzer.brutal_shuffle_bytes(base_pkt)
+
+        def brutal_duplicate():
+            return fuzzer.brutal_duplicate_segments(base_pkt)
+
+        def brutal_reverse():
+            return fuzzer.brutal_reverse_segment(base_pkt)
+
+        # 所有 fuzz 方法列表
         fuzz_methods = [
             fuzzer.fuzz_capwap_header,
             fuzzer.fuzz_control_header,
             fuzzer.fuzz_any_msg_length,
             fuzzer.fuzz_any_msg_value,
-            lambda: fuzzer.fuzz_specific_msg(38),
-            lambda: fuzzer.fuzz_specific_msg(39),
+            fuzz_msg_38,
+            fuzz_msg_39,
             fuzzer.fuzz_duplicate_msg,
             fuzzer.fuzz_drop_last_msg,
-            fuzzer.fuzz_shuffle_msgs
+            fuzzer.fuzz_shuffle_msgs,
+            fuzzer.fuzz_capwap_flags,
+            brutal_random,
+            brutal_insert,
+            brutal_delete,
+            brutal_shuffle,
+            brutal_duplicate,
+            brutal_reverse
         ]
 
         for i in range(MUTATION_COUNT):
             method = self._rng.choice(fuzz_methods)
             send_pkt = method()
-            request_info = {"iteration": i+1, "method": getattr(method,"__name__",str(method))}
+            method_name = getattr(method, "__name__", str(method))
+            request_info = {"iteration": i + 1, "method": method_name}
+            logging.info("Fuzz iteration %d: selected method: %s", i + 1, method_name)
+
             try:
                 req_pkt, resp = self.send_discovery_request(send_pkt)
                 resp_type, error_type = self.classify_discovery_response(req_pkt, resp, request_info)
                 status[resp_type] += 1
-                if resp_type=="error" and error_type:
-                    status["error_types"].setdefault(error_type,0)
-                    status["error_types"][error_type]+=1
-                status["total"]+=1
+                if resp_type == "error" and error_type:
+                    status["error_types"].setdefault(error_type, 0)
+                    status["error_types"][error_type] += 1
+                status["total"] += 1
             except Exception as e:
-                logging.error(f"Fuzz iteration {i+1} failed: {e}")
-                status["error"]+=1
-                status["error_types"].setdefault(type(e).__name__,0)
-                status["error_types"][type(e).__name__]+=1
-                status["total"]+=1
+                logging.error(f"Fuzz iteration {i + 1} failed: {e}")
+                status["error"] += 1
+                status["error_types"].setdefault(type(e).__name__, 0)
+                status["error_types"][type(e).__name__] += 1
+                status["total"] += 1
 
         logging.info(f"Fuzzing Summary: {status}")
         return status

@@ -139,6 +139,7 @@ def fuzz(
         for i in range(rounds):
             try:
                 # 每轮 fuzzing 返回一条状态，包括 response_type 和 error_type
+                logging.info(f"Starting fuzzing round {i + 1}/{rounds}")
                 status = fuzzer.fuzzing(pcap_path)
 
                 # 更新总统计

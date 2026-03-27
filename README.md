@@ -52,7 +52,7 @@ An academic CAPWAP Discovery Request/Response fuzzing tool for security research
 ### Install from source / 从源码安装
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sckrtge/capwap-discovery-fuzzer.git
 cd capwap-discovery-fuzzer
 pip install -e .
 ```
@@ -68,7 +68,7 @@ pip install -e ".[test]"
 ### Basic Command / 基本命令
 
 ```bash
-python -m capwap_discovery_fuzzer fuzz --help
+python -m capwap_discovery_fuzzer --help
 ```
 
 ### Basic Examples / 基本示例
@@ -76,7 +76,7 @@ python -m capwap_discovery_fuzzer fuzz --help
 #### 1. Unicast Fuzzing with PCAP / 使用PCAP的单播模糊测试
 
 ```bash
-python -m capwap_discovery_fuzzer fuzz \
+python -m capwap_discovery_fuzzer \
   --pcap ./pcaps/sample_discovery_request.pcap \
   --ac-ip 192.168.10.128 \
   --ac-port 5246 \
@@ -88,7 +88,7 @@ python -m capwap_discovery_fuzzer fuzz \
 #### 2. Broadcast Discovery / 广播发现
 
 ```bash
-python -m capwap_discovery_fuzzer fuzz \
+python -m capwap_discovery_fuzzer \
   --broadcast \
   --ac-port 5246 \
   --rounds 50 \
@@ -98,7 +98,7 @@ python -m capwap_discovery_fuzzer fuzz \
 #### 3. Replay JSON Requests / 回放JSON请求
 
 ```bash
-python -m capwap_discovery_fuzzer fuzz \
+python -m capwap_discovery_fuzzer \
   --ac-ip 192.168.10.128 \
   --ac-port 5246 \
   --replay-json-dir ./requests_json \
@@ -108,7 +108,7 @@ python -m capwap_discovery_fuzzer fuzz \
 #### 4. Random Request Generation / 随机请求生成
 
 ```bash
-python -m capwap_discovery_fuzzer fuzz \
+python -m capwap_discovery_fuzzer \
   --ac-ip 192.168.10.128 \
   --ac-port 5246 \
   --rounds 20 \
@@ -226,12 +226,12 @@ CAPWAP Fuzzing/Replay Summary
 └────────┴───────┘
 
 Error Type Distribution
-┌──────────────────────┬───────┐
-│ Error Type           │ Count │
-├──────────────────────┼───────┤
+┌──────────────────────────┬───────┐
+│ Error Type               │ Count │
+├──────────────────────────┼───────┤
 │ MissingCapwapHeaderError │ 1     │
 │ UnexpectedMsgTypeError   │ 1     │
-└──────────────────────┴───────┘
+└──────────────────────────┴───────┘
 ```
 
 ## Project Structure / 项目结构

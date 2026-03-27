@@ -40,6 +40,7 @@ class CAPWAPDiscoveryFuzzer:
         self.response_parser = ResponseParser()
         self.payload_creator = Payload_Creator(rng=self._rng)
 
+    # -------------------- 发送报文 --------------------
     def send_discovery_request(self, discovery_request):
         conf.verb = 0
         sport = self._rng.randint(20000, 60000)
@@ -47,6 +48,7 @@ class CAPWAPDiscoveryFuzzer:
         resp = sr1(pkt, timeout=self.timeout)
         return pkt, resp
 
+    # -------------------- 转 JSON --------------------
     def _scapy_to_json(self, pkt):
         if pkt is None:
             return None
@@ -59,6 +61,7 @@ class CAPWAPDiscoveryFuzzer:
             res["payload"] = self._scapy_to_json(payload)
         return res
 
+    # -------------------- 响应分类 --------------------
     def classify_discovery_response(self, request_pkt, discovery_response, request_info=None):
         raw_request = bytes(request_pkt)
         raw_response = bytes(discovery_response) if discovery_response else b""
@@ -96,6 +99,7 @@ class CAPWAPDiscoveryFuzzer:
         logging.info(f"Response Classification: {response_type}, ErrorType: {error_type}")
         return response_type, error_type
 
+    # -------------------- 从 PCAP 加载 --------------------
     def load_request_from_pcap(self, pcap_path: str) -> bytes:
         pkts = rdpcap(pcap_path)
         for pkt in pkts:
@@ -103,12 +107,8 @@ class CAPWAPDiscoveryFuzzer:
                 return bytes(pkt["UDP"].payload)
         raise ValueError("No CAPWAP Discovery Request found in pcap!")
 
-    # -------------------- 复合 fuzzing 主方法 --------------------
+    # -------------------- Fuzzing --------------------
     def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3, max_brutal_methods: int = 3):
-        """
-        每轮随机选取若干结构安全 fuzz 方法 + 若干暴力方法
-        暴力方法放最后，可以多选、重复
-        """
         status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
 
         if pcap_path:
@@ -118,14 +118,9 @@ class CAPWAPDiscoveryFuzzer:
 
         fuzzer = Payload_Fuzzer(base_pkt)
 
-        # -------------------- 结构安全方法 --------------------
-        def fuzz_msg_38():
-            return fuzzer.fuzz_specific_msg(38)
+        def fuzz_msg_38(): return fuzzer.fuzz_specific_msg(38)
+        def fuzz_msg_39(): return fuzzer.fuzz_specific_msg(39)
 
-        def fuzz_msg_39():
-            return fuzzer.fuzz_specific_msg(39)
-
-        # 安全的结构性 fuzz 方法（不破坏报文结构）
         safe_methods = [
             fuzzer.fuzz_capwap_header,
             fuzzer.fuzz_control_header,
@@ -139,7 +134,6 @@ class CAPWAPDiscoveryFuzzer:
             fuzzer.fuzz_capwap_flags,
         ]
 
-        # -------------------- 暴力方法 --------------------
         brutal_methods = [
             fuzzer.brutal_random_bytes,
             fuzzer.brutal_insert_random_bytes,
@@ -153,11 +147,9 @@ class CAPWAPDiscoveryFuzzer:
             pkt = base_pkt.copy()
             method_chain = []
 
-            # 随机选择结构安全方法
             num_safe = self._rng.randint(1, min(max_safe_methods, len(safe_methods)))
             chosen_safe = self._rng.sample(safe_methods, num_safe)
 
-            # 排序：header → length/value → duplicate/drop → shuffle
             def sort_key(method):
                 name = getattr(method, "__name__", str(method))
                 if "capwap_header" in name or "control_header" in name:
@@ -172,7 +164,6 @@ class CAPWAPDiscoveryFuzzer:
                     return 4
             chosen_safe.sort(key=sort_key)
 
-            # 执行结构安全方法
             for method in chosen_safe:
                 if "fuzz_specific_msg" in str(method):
                     pkt = method()
@@ -180,9 +171,8 @@ class CAPWAPDiscoveryFuzzer:
                     pkt = method()
                 method_chain.append(getattr(method, "__name__", str(method)))
 
-            # 执行暴力方法
             num_brutal = self._rng.randint(0, max_brutal_methods)
-            chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)  # 可重复
+            chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)
             for method in chosen_brutal:
                 pkt = method(pkt)
                 method_chain.append(getattr(method, "__name__", str(method)))
@@ -207,3 +197,45 @@ class CAPWAPDiscoveryFuzzer:
 
         logging.info(f"Composite Fuzzing Summary: {status}")
         return status
+
+    # -------------------- 复现单个 JSON --------------------
+    def replay_request_from_json(self, json_path: str, src_port: int | None = None):
+        path = Path(json_path)
+        if not path.exists():
+            raise FileNotFoundError(f"JSON file not found: {json_path}")
+
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        if "request_bytes" not in data:
+            raise ValueError("JSON does not contain 'request_bytes' field")
+
+        raw_payload = bytes.fromhex(data["request_bytes"])
+        sport = src_port or self._rng.randint(20000, 60000)
+        pkt = IP(dst=self.ac_ip)/UDP(sport=sport,dport=self.ac_port)/Raw(load=raw_payload)
+
+        conf.verb = 0
+        resp = sr1(pkt, timeout=self.timeout)
+
+        resp_type, error_type = self.classify_discovery_response(pkt, resp, request_info=data.get("request_info"))
+        return pkt, resp, resp_type, error_type
+
+    # -------------------- 批量复现 JSON 目录 --------------------
+    def replay_requests_from_dir(self, json_dir: str, src_port: int | None = None):
+        path = Path(json_dir)
+        if not path.exists() or not path.is_dir():
+            raise FileNotFoundError(f"JSON directory not found or not a directory: {json_dir}")
+
+        results = []
+        json_files = sorted(path.glob("*.json"))
+        if not json_files:
+            raise ValueError(f"No JSON files found in directory: {json_dir}")
+
+        for json_file in json_files:
+            try:
+                pkt, resp, resp_type, error_type = self.replay_request_from_json(str(json_file), src_port=src_port)
+                logging.info(f"Replayed {json_file.name}: response_type={resp_type}, error_type={error_type}")
+                results.append((pkt, resp, resp_type, error_type))
+            except Exception as e:
+                logging.error(f"Failed to replay {json_file.name}: {e}")
+        return results

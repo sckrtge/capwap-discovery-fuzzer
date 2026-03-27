@@ -22,6 +22,7 @@ venv/
 *.log
 capwap_log/
 capwap_response_logs/
+requests_json/
 
 # Scripts
 *.sh

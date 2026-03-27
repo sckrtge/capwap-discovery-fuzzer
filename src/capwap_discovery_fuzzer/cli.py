@@ -58,9 +58,17 @@ def fuzz(
         1.0,
         '--sleep',
         help='Sleep seconds per fuzzing round'
+    ),
+    replay_json_dir: Path | None = typer.Option(
+        None,
+        '--replay-json-dir',
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help='Directory containing JSON request logs to replay instead of fuzzing'
     )
 ):
-    """Run CAPWAP Discovery fuzzing"""
+    """Run CAPWAP Discovery fuzzing or replay JSON requests for crash reproduction"""
 
     # 初始化日志目录
     LOG_DIR_ROOT = Path("./capwap_log")
@@ -95,6 +103,11 @@ def fuzz(
         logging.info(msg)
     else:
         msg = "Using Random Discovery Request"
+        console.print(f"[+] {msg}")
+        logging.info(msg)
+
+    if replay_json_dir:
+        msg = f"Replay JSON directory: {replay_json_dir}"
         console.print(f"[+] {msg}")
         logging.info(msg)
 
@@ -138,27 +151,39 @@ def fuzz(
 
         for i in range(rounds):
             try:
-                # 每轮 fuzzing 返回一条状态，包括 response_type 和 error_type
-                logging.info(f"Starting fuzzing round {i + 1}/{rounds}")
-                status = fuzzer.fuzzing(pcap_path)
+                logging.info(f"Starting round {i + 1}/{rounds}")
 
-                # 更新总统计
-                for k in ("valid", "timeout", "error", "total"):
-                    total_status[k] += status.get(k, 0)
-                for etype, count in status.get("error_types", {}).items():
-                    total_status["error_types"].setdefault(etype, 0)
-                    total_status["error_types"][etype] += count
+                # -------------------- JSON Replay 模式 --------------------
+                if replay_json_dir:
+                    json_files = sorted(replay_json_dir.glob("*.json"))
+                    for json_file in json_files:
+                        logging.info(f"Replaying JSON request: {json_file}")
+                        pkt, resp, resp_type, error_type = fuzzer.replay_request_from_json(json_file)
+                        total_status[resp_type] += 1
+                        if error_type:
+                            total_status["error_types"].setdefault(error_type, 0)
+                            total_status["error_types"][error_type] += 1
+                        total_status["total"] += 1
+
+                # -------------------- 原版 Fuzzing 模式 --------------------
+                else:
+                    status = fuzzer.fuzzing(pcap_path)
+                    for k in ("valid", "timeout", "error", "total"):
+                        total_status[k] += status.get(k, 0)
+                    for etype, count in status.get("error_types", {}).items():
+                        total_status["error_types"].setdefault(etype, 0)
+                        total_status["error_types"][etype] += count
 
             except Exception as e:
                 progress.console.print(f"[red][-] Round {i + 1} error: {e}[/red]")
-                logging.exception(f"Fuzz iteration {i + 1} failed: {e}")
+                logging.exception(f"Round {i + 1} failed: {e}")
 
             finally:
                 progress.advance(task, 1)
                 time.sleep(sleep_per_round)
 
     # 输出总统计表
-    summary_table = Table(title="CAPWAP Fuzzing Summary")
+    summary_table = Table(title="CAPWAP Fuzzing/Replay Summary")
     summary_table.add_column("Type", style="bold")
     summary_table.add_column("Count", justify="right")
     for k in ("valid", "timeout", "error", "total"):

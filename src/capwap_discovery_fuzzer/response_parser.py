@@ -30,7 +30,6 @@ class ResponseParser:
     def __init__(self):
         self.stats = {rtype: 0 for rtype in ResponseType.all_types()}
         self.total_responses = 0
-        self._bind_layers()
 
     def _bind_layers(self):
         bind_layers(CAPWAP_Header, Control_Header)

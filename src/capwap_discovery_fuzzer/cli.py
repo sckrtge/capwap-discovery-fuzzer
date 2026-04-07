@@ -3,7 +3,6 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from pathlib import Path
-from datetime import datetime
 import time
 import logging
 
@@ -11,7 +10,6 @@ from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 
 app = typer.Typer()
 console = Console()
-DEFAULT_PCAP = Path('pcaps/sample_discovery_request.pcap')
 
 
 @app.command()
@@ -66,18 +64,26 @@ def fuzz(
         file_okay=False,
         dir_okay=True,
         help='Directory containing JSON request logs to replay instead of fuzzing'
+    ),
+    iface: str = typer.Option(
+        'lo',
+        '--iface',
+        help='Network interface for sending/sniffing (default: lo)'
     )
 ):
     """Run CAPWAP Discovery fuzzing or replay JSON requests for crash reproduction"""
 
-    # 初始化日志目录
-    LOG_DIR_ROOT = Path("./capwap_log")
-    LOG_DIR_ROOT.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = LOG_DIR_ROOT / timestamp
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "fuzzer.log"
+    if not broadcast and not ac_ip:
+        raise typer.BadParameter("Either --ac-ip (unicast) or --broadcast must be specified")
 
+    if seed is None:
+        seed = int(time.time_ns())
+
+    # 初始化 Fuzzer（log_dir 在内部创建）
+    fuzzer = CAPWAPDiscoveryFuzzer(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface)
+
+    # 统一配置 logging，写入 fuzzer 的 log 目录
+    log_file = fuzzer.log_dir / "fuzzer.log"
     logging.basicConfig(
         filename=str(log_file),
         filemode="w",
@@ -85,58 +91,31 @@ def fuzz(
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    # PCAP路径
     pcap_path = pcap.expanduser().resolve() if pcap else None
-
-    if not broadcast and not ac_ip:
-        raise typer.BadParameter("Either --ac-ip (unicast) or --broadcast must be specified")
-    if broadcast and ac_ip:
-        msg = "--ac-ip will be ignored in broadcast mode"
-        console.print(f"[yellow][!] {msg}[/yellow]")
-        logging.warning(msg)
 
     console.rule("[bold blue]CAPWAP Discovery Fuzzing[/bold blue]")
 
-    if pcap_path:
-        msg = f"PCAP file: {pcap_path}"
-        console.print(f"[+] {msg}")
-        logging.info(msg)
-    else:
-        msg = "Using Random Discovery Request"
-        console.print(f"[+] {msg}")
-        logging.info(msg)
+    if broadcast and ac_ip:
+        console.print("[yellow][!] --ac-ip will be ignored in broadcast mode[/yellow]")
 
-    if replay_json_dir:
-        msg = f"Replay JSON directory: {replay_json_dir}"
-        console.print(f"[+] {msg}")
-        logging.info(msg)
-
-    mode = "Broadcast" if broadcast else "Unicast"
-    console.print(f"[+] Mode      : {mode}")
-    logging.info("Mode: %s", mode)
-
+    console.print(f"[+] Mode      : {'Broadcast' if broadcast else 'Unicast'}")
     target = f"255.255.255.255:{ac_port}" if broadcast else f"{ac_ip}:{ac_port}"
     console.print(f"[+] Target    : {target}")
-    logging.info("Target: %s", target)
-
     console.print(f"[+] Rounds    : {rounds}")
-    logging.info("Rounds: %d", rounds)
+    console.print(f"[*] Seed      : {seed}")
+    console.print(f"[+] Log dir   : {fuzzer.log_dir}")
 
-    if seed is None:
-        seed = int(time.time_ns())
-    console.print(f"[*] Using random seed: {seed}")
-    logging.info("Random seed: %d", seed)
+    if pcap_path:
+        console.print(f"[+] PCAP      : {pcap_path}")
+    else:
+        console.print("[+] Seed pkt  : random")
 
-    # 初始化 Fuzzer
-    fuzzer = CAPWAPDiscoveryFuzzer(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed)
+    if replay_json_dir:
+        console.print(f"[+] Replay dir: {replay_json_dir}")
 
-    total_status = {
-        "total": 0,
-        "valid": 0,
-        "timeout": 0,
-        "error": 0,
-        "error_types": {}
-    }
+    logging.info("Mode: %s, Target: %s, Rounds: %d, Seed: %d", 'Broadcast' if broadcast else 'Unicast', target, rounds, seed)
+
+    total_status = {"total": 0, "valid": 0, "timeout": 0, "error": 0, "error_types": {}}
 
     with Progress(
         SpinnerColumn(),

@@ -1,6 +1,7 @@
 # capwap_discovery_fuzzer.py
 import random
 import logging
+import socket as _socket
 from pathlib import Path
 from datetime import datetime
 import json
@@ -10,15 +11,16 @@ from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
 from .errors import *
 
-MUTATION_COUNT = 10  # 可按需求调整
+MUTATION_COUNT = 1  # 每轮发送一条报文
 
 class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
-                 seed: int | None = None, broadcast: bool = False):
+                 seed: int | None = None, broadcast: bool = False, iface: str = 'lo'):
         self.ac_ip = ac_ip
         self.ac_port = ac_port
         self.timeout = timeout
         self.broadcast = broadcast
+        self.iface = iface
         self.seed = seed if seed is not None else random.SystemRandom().randint(0, 2**32 - 1)
         self._rng = random.Random(self.seed)
 
@@ -27,25 +29,36 @@ class CAPWAPDiscoveryFuzzer:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.responses_dir = self.log_dir / "responses"
         self.responses_dir.mkdir(exist_ok=True)
-        self.log_file = self.log_dir / "fuzzer.log"
 
-        logging.basicConfig(
-            filename=str(self.log_file),
-            filemode="w",
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-        )
-        logging.info(f"CAPWAP Fuzzer initialized with seed {self.seed}")
+        logging.info(f"CAPWAP Fuzzer initialized with seed {self.seed}, log_dir={self.log_dir}")
 
         self.response_parser = ResponseParser()
         self.payload_creator = Payload_Creator(rng=self._rng)
 
     # -------------------- 发送报文 --------------------
     def send_discovery_request(self, discovery_request):
-        conf.verb = 0
         sport = self._rng.randint(20000, 60000)
-        pkt = IP(dst=self.ac_ip)/UDP(sport=sport,dport=self.ac_port)/discovery_request
-        resp = sr1(pkt, timeout=self.timeout)
+        dst = "255.255.255.255" if self.broadcast else self.ac_ip
+        payload_bytes = bytes(discovery_request)
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        if self.broadcast:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+        sock.bind(('', sport))
+        sock.settimeout(self.timeout)
+
+        # 构造用于日志记录的 Scapy 包对象（不用于实际发送）
+        pkt = IP(dst=dst) / UDP(sport=sport, dport=self.ac_port) / discovery_request
+
+        try:
+            sock.sendto(payload_bytes, (dst, self.ac_port))
+            raw_resp, addr = sock.recvfrom(65535)
+            resp = IP(raw_resp) if raw_resp[0] >> 4 == 4 else Raw(raw_resp)
+        except _socket.timeout:
+            resp = None
+        finally:
+            sock.close()
+
         return pkt, resp
 
     # -------------------- 转 JSON --------------------
@@ -118,8 +131,8 @@ class CAPWAPDiscoveryFuzzer:
 
         fuzzer = Payload_Fuzzer(base_pkt)
 
-        def fuzz_msg_38(): return fuzzer.fuzz_specific_msg(38)
-        def fuzz_msg_39(): return fuzzer.fuzz_specific_msg(39)
+        def fuzz_msg_38(pkt=None): return fuzzer.fuzz_specific_msg(38, pkt)
+        def fuzz_msg_39(pkt=None): return fuzzer.fuzz_specific_msg(39, pkt)
 
         safe_methods = [
             fuzzer.fuzz_capwap_header,
@@ -143,32 +156,29 @@ class CAPWAPDiscoveryFuzzer:
             fuzzer.brutal_reverse_segment,
         ]
 
+        def sort_key(method):
+            name = getattr(method, "__name__", str(method))
+            if "capwap_header" in name or "control_header" in name:
+                return 0
+            elif "length" in name or "value" in name or "msg_3" in name or "capwap_flags" in name:
+                return 1
+            elif "duplicate_msg" in name or "drop_last_msg" in name:
+                return 2
+            elif "shuffle" in name:
+                return 3
+            else:
+                return 4
+
         for i in range(MUTATION_COUNT):
             pkt = base_pkt.copy()
             method_chain = []
 
             num_safe = self._rng.randint(1, min(max_safe_methods, len(safe_methods)))
             chosen_safe = self._rng.sample(safe_methods, num_safe)
-
-            def sort_key(method):
-                name = getattr(method, "__name__", str(method))
-                if "capwap_header" in name or "control_header" in name:
-                    return 0
-                elif "length" in name or "value" in name or "specific_msg" in name or "capwap_flags" in name:
-                    return 1
-                elif "duplicate_msg" in name or "drop_last_msg" in name:
-                    return 2
-                elif "shuffle" in name:
-                    return 3
-                else:
-                    return 4
             chosen_safe.sort(key=sort_key)
 
             for method in chosen_safe:
-                if "fuzz_specific_msg" in str(method):
-                    pkt = method()
-                else:
-                    pkt = method()
+                pkt = method(pkt)
                 method_chain.append(getattr(method, "__name__", str(method)))
 
             num_brutal = self._rng.randint(0, max_brutal_methods)
@@ -212,10 +222,10 @@ class CAPWAPDiscoveryFuzzer:
 
         raw_payload = bytes.fromhex(data["request_bytes"])
         sport = src_port or self._rng.randint(20000, 60000)
-        pkt = IP(dst=self.ac_ip)/UDP(sport=sport,dport=self.ac_port)/Raw(load=raw_payload)
+        pkt = IP(dst=self.ac_ip)/UDP(sport=sport, dport=self.ac_port)/Raw(load=raw_payload)
 
         conf.verb = 0
-        resp = sr1(pkt, timeout=self.timeout)
+        resp = sr1(pkt, timeout=self.timeout, verbose=0)
 
         resp_type, error_type = self.classify_discovery_response(pkt, resp, request_info=data.get("request_info"))
         return pkt, resp, resp_type, error_type

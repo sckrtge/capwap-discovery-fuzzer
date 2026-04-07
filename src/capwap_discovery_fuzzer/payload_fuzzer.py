@@ -7,8 +7,9 @@ class Payload_Fuzzer:
     def __init__(self, base_pkt: Packet):
         self.base = base_pkt
 
-    def _clone(self) -> Packet:
-        p = self.base.copy()
+    def _clone(self, pkt: Packet | None = None) -> Packet:
+        src = pkt if pkt is not None else self.base
+        p = src.copy()
         if IP in p:
             p[IP].len = None
         if UDP in p:
@@ -17,8 +18,8 @@ class Payload_Fuzzer:
         return p
 
     # --------------------- 原有 CAPWAP fuzz 方法 ---------------------
-    def fuzz_capwap_header(self) -> Packet:
-        p = self._clone()
+    def fuzz_capwap_header(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         hdr = p.getlayer("CAPWAP Header")
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
@@ -27,8 +28,8 @@ class Payload_Fuzzer:
         hdr.FragmentOffset = random.randint(0, 0x1FFF)
         return p
 
-    def fuzz_control_header(self) -> Packet:
-        p = self._clone()
+    def fuzz_control_header(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         ctrl = p.getlayer("Control Header")
         if ctrl is None:
             raise ValueError("Control header invalid!")
@@ -47,8 +48,8 @@ class Payload_Fuzzer:
             i += 1
         return elems
 
-    def fuzz_any_msg_type(self) -> Packet:
-        p = self._clone()
+    def fuzz_any_msg_type(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if not elems:
             return p
@@ -56,8 +57,8 @@ class Payload_Fuzzer:
         target.Type = random.randint(0, 512)
         return p
 
-    def fuzz_any_msg_length(self) -> Packet:
-        p = self._clone()
+    def fuzz_any_msg_length(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if not elems:
             return p
@@ -65,8 +66,8 @@ class Payload_Fuzzer:
         target.Length = random.randint(0, 512)
         return p
 
-    def fuzz_any_msg_value(self) -> Packet:
-        p = self._clone()
+    def fuzz_any_msg_value(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if not elems:
             return p
@@ -76,8 +77,8 @@ class Payload_Fuzzer:
         target.Length = new_len
         return p
 
-    def fuzz_specific_msg(self, msg_type: int) -> Packet:
-        p = self._clone()
+    def fuzz_specific_msg(self, msg_type: int, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         for elem in elems:
             if elem.Type == msg_type:
@@ -87,8 +88,8 @@ class Payload_Fuzzer:
                 break
         return p
 
-    def fuzz_duplicate_msg(self) -> Packet:
-        p = self._clone()
+    def fuzz_duplicate_msg(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if not elems:
             return p
@@ -97,16 +98,16 @@ class Payload_Fuzzer:
         target.add_payload(dup)
         return p
 
-    def fuzz_drop_last_msg(self) -> Packet:
-        p = self._clone()
+    def fuzz_drop_last_msg(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if len(elems) < 2:
             return p
         elems[-2].remove_payload()
         return p
 
-    def fuzz_shuffle_msgs(self) -> Packet:
-        p = self._clone()
+    def fuzz_shuffle_msgs(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         elems = self._iter_message_elements(p)
         if len(elems) < 2:
             return p
@@ -124,8 +125,8 @@ class Payload_Fuzzer:
         parent.add_payload(new_chain)
         return p
 
-    def fuzz_capwap_flags(self) -> Packet:
-        p = self._clone()
+    def fuzz_capwap_flags(self, pkt: Packet | None = None) -> Packet:
+        p = self._clone(pkt)
         hdr = p.getlayer("CAPWAP Header")
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
@@ -151,57 +152,59 @@ class Payload_Fuzzer:
             hdr.Flags = 7
         return p
 
-    # --------------------- 暴力字符串级 fuzz 方法 ---------------------
+    # --------------------- 暴力字节级 fuzz 方法 ---------------------
+    def _pkt_to_raw(self, pkt: Packet) -> bytearray:
+        return bytearray(bytes(pkt))
+
+    def _raw_to_pkt(self, raw: bytearray, original: Packet) -> Packet:
+        if len(raw) == 0:
+            return original
+        return IP(bytes(raw)) if raw[0] >> 4 == 4 else original.__class__(bytes(raw))
+
     def brutal_random_bytes(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         for _ in range(random.randint(1, max(1, len(raw)//10))):
             idx = random.randint(0, len(raw)-1)
             raw[idx] = random.getrandbits(8)
-        return IP(raw) if raw[:1][0] >> 4 == 4 else p.__class__(raw)
+        return self._raw_to_pkt(raw, pkt)
 
     def brutal_insert_random_bytes(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         for _ in range(random.randint(1, 5)):
             idx = random.randint(0, len(raw))
-            raw[idx:idx] = bytes([random.getrandbits(8) for _ in range(random.randint(1,5))])
-        return IP(raw) if raw[:1][0] >> 4 == 4 else p.__class__(raw)
+            raw[idx:idx] = bytes([random.getrandbits(8) for _ in range(random.randint(1, 5))])
+        return self._raw_to_pkt(raw, pkt)
 
     def brutal_delete_random_bytes(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         for _ in range(random.randint(1, 5)):
             if len(raw) == 0:
                 break
             idx = random.randint(0, len(raw)-1)
             del raw[idx]
-        return IP(raw) if raw[:1][0] >> 4 == 4 and len(raw)>0 else p.__class__(raw)
+        return self._raw_to_pkt(raw, pkt)
 
     def brutal_shuffle_bytes(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         random.shuffle(raw)
-        return IP(raw) if raw[:1][0] >> 4 == 4 else p.__class__(raw)
+        return self._raw_to_pkt(raw, pkt)
 
     def brutal_duplicate_segments(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
-            return p
+            return pkt
         start = random.randint(0, len(raw)//2)
         end = random.randint(start+1, len(raw))
         segment = raw[start:end]
         idx = random.randint(0, len(raw))
         raw[idx:idx] = segment
-        return IP(raw) if raw[:1][0] >> 4 == 4 else p.__class__(raw)
+        return self._raw_to_pkt(raw, pkt)
 
     def brutal_reverse_segment(self, pkt: Packet) -> Packet:
-        p = self._clone()
-        raw = bytearray(bytes(p))
+        raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
-            return p
+            return pkt
         start = random.randint(0, len(raw)-2)
         end = random.randint(start+1, len(raw))
         raw[start:end] = reversed(raw[start:end])
-        return IP(raw) if raw[:1][0] >> 4 == 4 else p.__class__(raw)
+        return self._raw_to_pkt(raw, pkt)

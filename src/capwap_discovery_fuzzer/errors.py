@@ -27,3 +27,19 @@ class UnexpectedMsgTypeError(InvalidResponseError): pass
 class MissingRequiredElementError(InvalidResponseError): pass
 class InvalidRadioInfoError(InvalidResponseError): pass
 class NetworkError(CAPWAPFuzzerError): pass
+
+class CrashDetectedError(CAPWAPFuzzerError):
+    """Raised when the target AC stops responding to valid probes, indicating a potential crash."""
+    def __init__(
+        self,
+        message: str,
+        round_number: int | None = None,
+        probe_attempts: int | None = None,
+        ac_ip: str | None = None,
+        ac_port: int | None = None,
+    ):
+        super().__init__(message)
+        self.round_number = round_number
+        self.probe_attempts = probe_attempts
+        self.ac_ip = ac_ip
+        self.ac_port = ac_port

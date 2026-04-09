@@ -23,10 +23,18 @@ venv/
 capwap_log/
 capwap_response_logs/
 requests_json/
-docs/
 
-# Scripts
+# Docs & scripts (contain personal info / not for public repo)
+docs/
 *.sh
+
+# Markdown (internal references, AI tooling config)
+CLAUDE.md
+ARCHITECTURE.md
 
 # PCAP cache or temp
 *.pcap.tmp
+
+# Word/Office temp files
+~$*
+~WRL*.tmp

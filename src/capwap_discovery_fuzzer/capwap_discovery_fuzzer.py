@@ -112,6 +112,50 @@ class CAPWAPDiscoveryFuzzer:
         logging.info(f"Response Classification: {response_type}, ErrorType: {error_type}")
         return response_type, error_type
 
+    # -------------------- 存活探测 --------------------
+    def is_target_alive(self, retries: int = 3, probe_timeout: float | None = None) -> bool:
+        """Send a valid Discovery Request and check if the target AC responds.
+
+        This method is designed as an extension point: subclasses targeting specific
+        vendor ACs (e.g. vSmartZone) can override it to implement alternative liveness
+        strategies (e.g. ICMP ping, vendor-specific keepalive, HTTP health endpoint).
+
+        Args:
+            retries: Number of probe attempts before declaring the target dead.
+            probe_timeout: Per-attempt socket timeout in seconds.  Falls back to
+                           ``self.timeout`` when not specified.
+
+        Returns:
+            ``True`` if at least one probe attempt receives a response, ``False``
+            if all attempts time out or raise a network error.
+        """
+        timeout = probe_timeout if probe_timeout is not None else self.timeout
+        probe_pkt = self.payload_creator.create_discovery_request(valid=True)
+        dst = "255.255.255.255" if self.broadcast else self.ac_ip
+
+        for attempt in range(1, retries + 1):
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            if self.broadcast:
+                sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+            sock.settimeout(timeout)
+            sport = self._rng.randint(20000, 60000)
+            sock.bind(('', sport))
+            try:
+                sock.sendto(bytes(probe_pkt), (dst, self.ac_port))
+                raw_resp, _ = sock.recvfrom(65535)
+                if raw_resp:
+                    logging.debug("Probe attempt %d/%d: target responded", attempt, retries)
+                    return True
+            except _socket.timeout:
+                logging.debug("Probe attempt %d/%d: timed out", attempt, retries)
+            except OSError as e:
+                logging.debug("Probe attempt %d/%d: network error: %s", attempt, retries, e)
+            finally:
+                sock.close()
+
+        logging.warning("All %d probe attempts failed — target may have crashed", retries)
+        return False
+
     # -------------------- 从 PCAP 加载 --------------------
     def load_request_from_pcap(self, pcap_path: str) -> bytes:
         pkts = rdpcap(pcap_path)

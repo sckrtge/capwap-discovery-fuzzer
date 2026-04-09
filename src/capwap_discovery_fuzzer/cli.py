@@ -1,3 +1,5 @@
+import json
+import sys
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
@@ -5,8 +7,10 @@ from rich.table import Table
 from pathlib import Path
 import time
 import logging
+from datetime import datetime
 
 from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
+from .errors import CrashDetectedError
 
 app = typer.Typer()
 console = Console()
@@ -69,6 +73,12 @@ def fuzz(
         'lo',
         '--iface',
         help='Network interface for sending/sniffing (default: lo)'
+    ),
+    probe_interval: int = typer.Option(
+        10,
+        '--probe-interval',
+        help='Check target liveness every N rounds (0 = disabled). On crash: saves crash_report.json and exits with code 2.',
+        min=0
     )
 ):
     """Run CAPWAP Discovery fuzzing or replay JSON requests for crash reproduction"""
@@ -128,9 +138,23 @@ def fuzz(
 
         task = progress.add_task('[bold cyan]Fuzzing CAPWAP Discovery[/bold cyan]', total=rounds)
 
+        crash_error: CrashDetectedError | None = None
+
         for i in range(rounds):
             try:
                 logging.info(f"Starting round {i + 1}/{rounds}")
+
+                # -------------------- Crash 探测 --------------------
+                if probe_interval > 0 and i > 0 and i % probe_interval == 0:
+                    logging.info("Probe check at round %d", i + 1)
+                    if not fuzzer.is_target_alive():
+                        raise CrashDetectedError(
+                            f"Target stopped responding after round {i}",
+                            round_number=i,
+                            probe_attempts=3,
+                            ac_ip=ac_ip,
+                            ac_port=ac_port,
+                        )
 
                 # -------------------- JSON Replay 模式 --------------------
                 if replay_json_dir:
@@ -153,13 +177,37 @@ def fuzz(
                         total_status["error_types"].setdefault(etype, 0)
                         total_status["error_types"][etype] += count
 
+            except CrashDetectedError as e:
+                progress.console.print(f"[bold red][!] CRASH DETECTED at round {i + 1}: {e}[/bold red]")
+                logging.error("Crash detected at round %d: %s", i + 1, e)
+                crash_error = e
+                progress.advance(task, 1)
+                break
+
             except Exception as e:
                 progress.console.print(f"[red][-] Round {i + 1} error: {e}[/red]")
                 logging.exception(f"Round {i + 1} failed: {e}")
 
             finally:
-                progress.advance(task, 1)
+                if crash_error is None:
+                    progress.advance(task, 1)
                 time.sleep(sleep_per_round)
+
+    # -------------------- Crash 报告 --------------------
+    if crash_error is not None:
+        crash_report = {
+            "crash_detected_at_round": crash_error.round_number,
+            "probe_attempts": crash_error.probe_attempts,
+            "ac_ip": crash_error.ac_ip,
+            "ac_port": crash_error.ac_port,
+            "timestamp": datetime.now().isoformat(),
+            "total_status": total_status,
+        }
+        report_path = fuzzer.log_dir / "crash_report.json"
+        with open(report_path, "w") as f:
+            json.dump(crash_report, f, indent=2, default=str)
+        console.print(f"[bold red][!] Crash report saved to {report_path}[/bold red]")
+        sys.exit(2)
 
     # 输出总统计表
     summary_table = Table(title="CAPWAP Fuzzing/Replay Summary")

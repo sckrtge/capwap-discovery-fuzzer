@@ -1,263 +1,159 @@
-
 # CAPWAP Discovery Fuzzer
 
-An academic CAPWAP Discovery Request/Response fuzzing tool for security research and protocol testing.
+> 本项目为**重庆大学本科毕业设计**《针对CAPWAP协议的安全分析工具设计与实现》的项目代码。
+>
+> This repository contains the source code for the undergraduate thesis project *"Design and Implementation of a Security Analysis Tool for the CAPWAP Protocol"* at Chongqing University.
 
-# CAPWAP 发现协议模糊测试工具
+---
 
-用于安全研究和协议测试的学术性CAPWAP发现请求/响应模糊测试工具。
+A fuzzing tool for CAPWAP (Control And Provisioning of Wireless Access Points) Discovery Requests over UDP port 5246. It sends structurally mutated discovery packets to a target Access Controller (AC) and classifies responses as valid, timeout, or error — logging every request/response pair as JSON for later replay and crash reproduction.
+
+针对 CAPWAP（无线接入点控制与配置协议）Discovery Request 报文的模糊测试工具，工作在 UDP 5246 端口。向目标 AC（接入控制器）发送结构变异的探测包，将响应分类为 valid（有效）、timeout（超时）或 error（错误），并将每对请求/响应记录为 JSON 文件，支持后续复现和崩溃分析。
+
+---
 
 ## Features / 功能特性
 
-- **Protocol Support / 协议支持**: CAPWAP Discovery Request/Response (RFC 5415)
-- **Multiple Fuzzing Strategies / 多种模糊测试策略**:
-  - Safe fuzzing methods (header fields, message elements)
-  - 安全的模糊测试方法（头部字段、消息元素）
-  - Brutal fuzzing methods (byte-level mutations)
-  - 暴力模糊测试方法（字节级变异）
-  - Composite fuzzing (combining multiple methods)
-  - 复合模糊测试（组合多种方法）
-- **Multiple Modes / 多种模式**:
-  - Unicast mode (target specific AC)
-  - 单播模式（针对特定AC）
-  - Broadcast mode (discover ACs in network)
-  - 广播模式（发现网络中的AC）
-  - PCAP-based fuzzing (load request from capture)
-  - 基于PCAP的模糊测试（从抓包文件加载请求）
-  - Random request generation
-  - 随机请求生成
-- **Response Analysis / 响应分析**:
-  - Automatic response classification (valid/error/timeout)
-  - 自动响应分类（有效/错误/超时）
-  - Detailed error type identification
-  - 详细的错误类型识别
-  - Response structure parsing and validation
-  - 响应结构解析与验证
-- **Logging & Replay / 日志记录与回放**:
-  - JSON-based request/response logging
-  - 基于JSON的请求/响应日志记录
-  - Request replay for crash reproduction
-  - 请求回放用于崩溃复现
-  - Comprehensive statistics and reports
-  - 全面的统计和报告
+- **Unicast and broadcast modes** — target a specific AC IP or send to `255.255.255.255`
+  **单播与广播模式** — 指定目标 AC IP 或向 `255.255.255.255` 广播
+- **Structured mutations** — fuzz CAPWAP/Control headers, message element types/lengths/values, flags, element ordering
+  **结构化变异** — 对 CAPWAP/Control 头部、消息元素类型/长度/值、标志位、元素顺序进行模糊测试
+- **Byte-level mutations** — random overwrites, insertions, deletions, shuffles, segment duplication/reversal
+  **字节级变异** — 随机覆写、插入、删除、乱序、片段复制/反转
+- **Chained mutations** — each round applies 1–3 structured mutations followed by 0–3 byte-level mutations
+  **链式变异** — 每轮依次施加 1–3 次结构化变异和 0–3 次字节级变异
+- **Reproducible runs** — seed-controlled RNG; all results written to JSON
+  **可复现运行** — 种子控制随机数；所有结果写入 JSON
+- **Replay mode** — re-send saved request logs for crash reproduction
+  **重放模式** — 重发已保存的请求日志以复现崩溃
+- **PCAP import** — load a captured Discovery Request as the base packet
+  **PCAP 导入** — 从抓包文件加载 Discovery Request 作为基础报文
+- **Crash detection** — periodically probe the target with a valid packet; save `crash_report.json` and exit with code 2 on no response
+  **崩溃检测** — 周期性发送合法探测包；目标无响应时保存 `crash_report.json` 并以退出码 2 退出
+
+---
+
+## Requirements / 环境要求
+
+- Python >= 3.10
+
+---
 
 ## Installation / 安装
 
-### Requirements / 依赖
-
-- Python 3.10+
-- Scapy 2.5+
-- Typer (for CLI)
-
-### Install from source / 从源码安装
-
 ```bash
-git clone https://github.com/sckrtge/capwap-discovery-fuzzer.git
+# Clone the repository / 克隆仓库
+git clone https://github.com/sckrt/capwap_discovery_fuzzer.git
 cd capwap-discovery-fuzzer
+
+# Install dependencies / 安装依赖
 pip install -e .
-```
 
-### Development setup / 开发环境设置
-
-```bash
+# Install with dev/test dependencies / 安装开发/测试依赖
 pip install -e ".[test]"
 ```
 
-## Usage / 使用说明
+---
 
-### Basic Command / 基本命令
+## Usage / 使用方法
 
-```bash
-python -m capwap_discovery_fuzzer --help
-```
-
-### Basic Examples / 基本示例
-
-#### 1. Unicast Fuzzing with PCAP / 使用PCAP的单播模糊测试
+### Unicast mode (target a specific AC) / 单播模式（指定目标 AC）
 
 ```bash
-python -m capwap_discovery_fuzzer \
-  --pcap ./pcaps/sample_discovery_request.pcap \
-  --ac-ip 192.168.10.128 \
-  --ac-port 5246 \
-  --rounds 10 \
+sudo python -m capwap_discovery_fuzzer \
+  --ac-ip 192.168.33.128 \
+  --rounds 100 \
   --timeout 3 \
-  --seed 1337
+  --iface lo
 ```
 
-#### 2. Broadcast Discovery / 广播发现
+### Broadcast mode / 广播模式
 
 ```bash
-python -m capwap_discovery_fuzzer \
+sudo python -m capwap_discovery_fuzzer \
   --broadcast \
   --ac-port 5246 \
-  --rounds 50 \
-  --timeout 3
+  --rounds 100 \
+  --timeout 3 \
+  --iface eth0
 ```
 
-#### 3. Replay JSON Requests / 回放JSON请求
+### Load a base packet from PCAP / 从 PCAP 加载基础报文
 
 ```bash
-python -m capwap_discovery_fuzzer \
-  --ac-ip 192.168.10.128 \
-  --ac-port 5246 \
-  --replay-json-dir ./requests_json \
-  --rounds 5
+sudo python -m capwap_discovery_fuzzer \
+  --ac-ip 192.168.33.128 \
+  --pcap ./capture.pcap \
+  --rounds 50
 ```
 
-#### 4. Random Request Generation / 随机请求生成
+### Replay saved logs for crash reproduction / 重放日志以复现崩溃
 
 ```bash
-python -m capwap_discovery_fuzzer \
-  --ac-ip 192.168.10.128 \
-  --ac-port 5246 \
-  --rounds 20 \
-  --timeout 2.5
+sudo python -m capwap_discovery_fuzzer \
+  --ac-ip 192.168.33.128 \
+  --replay-json-dir ./capwap_log/20240101_120000/responses/
 ```
 
-### Command Line Options / 命令行选项
+### All options / 全部参数
 
-| Option / 选项 | Description / 描述 | Default / 默认值 |
-|--------------|-------------------|-----------------|
-| `--pcap` | PCAP file containing CAPWAP Discovery Request / 包含CAPWAP发现请求的PCAP文件 | None |
-| `--ac-ip` | Target AC IP address (unicast mode) / 目标AC IP地址（单播模式） | None |
-| `--ac-port` | Target AC control port / 目标AC控制端口 | 5246 |
-| `--broadcast` | Use UDP broadcast for CAPWAP Discovery / 使用UDP广播进行CAPWAP发现 | False |
-| `--rounds` | Rounds of fuzzing iterations / 模糊测试迭代轮数 | 1 |
-| `--seed` | Random seed for fuzzing / 模糊测试随机种子 | System time |
-| `--timeout` | Timeout for waiting response (seconds) / 等待响应的超时时间（秒） | 3.0 |
-| `--sleep` | Sleep seconds per fuzzing round / 每轮模糊测试的睡眠时间（秒） | 1.0 |
-| `--replay-json-dir` | Directory containing JSON request logs to replay / 包含要回放的JSON请求日志的目录 | None |
+| Option | Default | Description / 说明 |
+|--------|---------|-------------|
+| `--ac-ip` | — | Target AC IP address (unicast; required unless `--broadcast`) / 目标 AC IP（单播模式，与 `--broadcast` 二选一） |
+| `--broadcast` | `false` | Send to `255.255.255.255` / 向全网段广播 |
+| `--ac-port` | `5246` | Target UDP port / 目标 UDP 端口 |
+| `--rounds` | `1` | Number of fuzzing iterations / 模糊测试轮数 |
+| `--timeout` | `3.0` | Seconds to wait for a response per round / 每轮响应等待超时（秒） |
+| `--sleep` | `1.0` | Sleep between rounds (seconds) / 每轮间隔（秒） |
+| `--seed` | random | RNG seed for reproducible runs / 随机数种子，用于复现运行 |
+| `--pcap` | — | PCAP file containing one CAPWAP Discovery Request / 含 Discovery Request 的 PCAP 文件 |
+| `--replay-json-dir` | — | Directory of JSON logs to replay instead of fuzzing / 待重放的 JSON 日志目录 |
+| `--iface` | `lo` | Network interface / 网络接口 |
+| `--probe-interval` | `10` | Check target liveness every N rounds; 0 = disabled. Exits with code 2 and saves `crash_report.json` on crash / 每 N 轮探测目标存活；0 为禁用；崩溃时退出码为 2 并保存 `crash_report.json` |
 
-**Note / 注意**: Either `--ac-ip` (unicast) or `--broadcast` must be specified. / 必须指定`--ac-ip`（单播）或`--broadcast`。
+---
 
-## Fuzzing Methods / 模糊测试方法
+## Output / 输出结构
 
-### Safe Fuzzing Methods / 安全模糊测试方法
+Each run creates a timestamped directory under `./capwap_log/`:
 
-1. **CAPWAP Header Fuzzing / CAPWAP头部模糊测试**
-   - Version field mutation / 版本字段变异
-   - Header length field mutation / 头部长度字段变异
-   - Fragment offset field mutation / 分片偏移字段变异
-
-2. **Control Header Fuzzing / 控制头部模糊测试**
-   - Sequence number mutation / 序列号变异
-   - Message elements length mutation / 消息元素长度变异
-
-3. **Message Element Fuzzing / 消息元素模糊测试**
-   - Message type mutation / 消息类型变异
-   - Message length mutation / 消息长度变异
-   - Message value mutation / 消息值变异
-   - Specific message type fuzzing (Type 38, 39) / 特定消息类型模糊测试（类型38、39）
-
-4. **Structural Fuzzing / 结构模糊测试**
-   - Message duplication / 消息复制
-   - Last message dropping / 最后消息丢弃
-   - Message shuffling / 消息重排
-   - CAPWAP flags mutation / CAPWAP标志位变异
-
-### Brutal Fuzzing Methods / 暴力模糊测试方法
-
-1. **Byte-level Mutations / 字节级变异**
-   - Random byte flipping / 随机字节翻转
-   - Random byte insertion / 随机字节插入
-   - Random byte deletion / 随机字节删除
-   - Byte shuffling / 字节重排
-   - Segment duplication / 片段复制
-   - Segment reversal / 片段反转
-
-### Composite Fuzzing / 复合模糊测试
-
-The tool combines multiple safe and brutal methods in each iteration for more effective fuzzing. / 工具在每次迭代中组合多种安全和暴力方法，以实现更有效的模糊测试。
-
-## Output and Logging / 输出与日志记录
-
-### Directory Structure / 目录结构
+每次运行在 `./capwap_log/` 下创建带时间戳的目录：
 
 ```
 capwap_log/
-├── YYYYMMDD_HHMMSS/          # Session directory / 会话目录
-│   ├── fuzzer.log           # Text log file / 文本日志文件
-│   └── responses/           # JSON response files / JSON响应文件
-│       └── response_*.json  # Individual response records / 单个响应记录
+└── 20240101_120000/
+    ├── fuzzer.log
+    ├── crash_report.json        # 仅崩溃检测触发时生成 / only on crash detection
+    └── responses/
+        ├── response_20240101_120001_000001.json
+        └── ...
 ```
 
-### JSON Response Format / JSON响应格式
+Each JSON file contains the full request (hex + parsed structure), the raw response, the response classification, and the mutation chain that produced the packet — enough information to reproduce any interesting finding.
 
-Each response is saved as a JSON file with the following structure: / 每个响应保存为包含以下结构的JSON文件：
+每个 JSON 文件包含完整请求（十六进制 + 解析结构）、原始响应、响应分类及产生该报文的变异链，信息足以复现任何值得关注的发现。
 
-```json
-{
-  "request_bytes": "hex string",
-  "request_structure": {...},
-  "response_bytes": "hex string",
-  "parsed_response": {...},
-  "response_type": "valid|error|timeout",
-  "error_type": "ErrorClassName",
-  "request_info": {
-    "iteration": 1,
-    "method_chain": ["fuzz_capwap_header", "brutal_random_bytes"]
-  }
-}
+Response types / 响应类型：
+
+| Type / 类型 | Meaning / 含义 |
+|------|---------|
+| `valid` | AC returned a well-formed Discovery Response (MsgType=2, required elements present) / AC 返回了合法的 Discovery Response |
+| `timeout` | No response received within the timeout window / 超时未收到响应 |
+| `error` | Response received but failed structural validation / 收到响应但结构校验失败 |
+
+---
+
+## Development / 开发
+
+```bash
+pytest                        # run tests / 运行测试
+pytest -k "pattern"           # run tests matching pattern / 运行匹配的测试
+coverage run -m pytest && coverage html  # coverage report (HTML) / 生成覆盖率报告
+pip install build && python -m build     # build the package / 构建包
 ```
 
-### Console Output / 控制台输出
-
-The tool provides real-time progress and summary tables: / 工具提供实时进度和摘要表格：
-
-```
-CAPWAP Discovery Fuzzing
-[+] PCAP file: ./pcaps/sample_discovery_request.pcap
-[+] Mode      : Unicast
-[+] Target    : 192.168.10.128:5246
-[+] Rounds    : 10
-[*] Using random seed: 1711543200
-
-Fuzzing CAPWAP Discovery [████████████████████] 10/10
-
-CAPWAP Fuzzing/Replay Summary
-┌────────┬───────┐
-│ Type   │ Count │
-├────────┼───────┤
-│ valid  │ 5     │
-│ timeout│ 3     │
-│ error  │ 2     │
-│ total  │ 10    │
-└────────┴───────┘
-
-Error Type Distribution
-┌──────────────────────────┬───────┐
-│ Error Type               │ Count │
-├──────────────────────────┼───────┤
-│ MissingCapwapHeaderError │ 1     │
-│ UnexpectedMsgTypeError   │ 1     │
-└──────────────────────────┴───────┘
-```
-
-## Project Structure / 项目结构
-
-```
-src/capwap_discovery_fuzzer/
-├── __init__.py
-├── __main__.py
-├── capwap_discovery_fuzzer.py  # Main fuzzer class / 主模糊测试类
-├── cli.py                      # Command line interface / 命令行接口
-├── errors.py                   # Custom exception classes / 自定义异常类
-├── payload_fuzzer.py           # Fuzzing methods / 模糊测试方法
-├── request_creater.py          # Request generation / 请求生成
-├── response_parser.py          # Response parsing / 响应解析
-└── utils.py                    # Utility functions / 工具函数
-
-tests/
-└── test_capwap_discovery_fuzzer.py
-
-pcaps/
-└── sample_discovery_request.pcap  # Example CAPWAP request / 示例CAPWAP请求
-
-run_fuzzing.sh                    # Example unicast script / 单播示例脚本
-run_fuzzing_broadcast.sh          # Example broadcast script / 广播示例脚本
-```
+---
 
 ## License / 许可证
 
-MIT License
+MIT

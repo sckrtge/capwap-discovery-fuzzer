@@ -100,6 +100,8 @@ def fuzz(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    # 禁止 logging 向 stderr 输出，所有日志只写文件
+    logging.getLogger().handlers = [h for h in logging.getLogger().handlers if isinstance(h, logging.FileHandler)]
 
     pcap_path = pcap.expanduser().resolve() if pcap else None
 
@@ -124,6 +126,14 @@ def fuzz(
         console.print(f"[+] Replay dir: {replay_json_dir}")
 
     logging.info("Mode: %s, Target: %s, Rounds: %d, Seed: %d", 'Broadcast' if broadcast else 'Unicast', target, rounds, seed)
+
+    # -------------------- 启动前存活检测 --------------------
+    console.print("[*] Pre-flight check: probing target AC...")
+    if not fuzzer.is_target_alive():
+        console.print(f"[bold red][!] Target AC {target} is not reachable or not running. Aborting.[/bold red]")
+        logging.error("Pre-flight check failed: target AC %s did not respond", target)
+        raise typer.Exit(code=1)
+    console.print("[green][+] Target AC is alive. Starting fuzzing...[/green]")
 
     total_status = {"total": 0, "valid": 0, "timeout": 0, "error": 0, "error_types": {}}
 

@@ -153,7 +153,7 @@ class CAPWAPDiscoveryFuzzer:
             finally:
                 sock.close()
 
-        logging.warning("All %d probe attempts failed — target may have crashed", retries)
+        logging.info("All %d probe attempts failed — target may have crashed", retries)
         return False
 
     # -------------------- 从 PCAP 加载 --------------------

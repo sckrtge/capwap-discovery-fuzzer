@@ -103,7 +103,7 @@ def fuzz(
     # 禁止 logging 向 stderr 输出，所有日志只写文件
     logging.getLogger().handlers = [h for h in logging.getLogger().handlers if isinstance(h, logging.FileHandler)]
 
-    pcap_path = pcap.expanduser().resolve() if pcap else None
+    pcap_path = str(pcap.expanduser().resolve()) if pcap else None
 
     console.rule("[bold blue]CAPWAP Discovery Fuzzing[/bold blue]")
 
@@ -129,7 +129,7 @@ def fuzz(
 
     # -------------------- 启动前存活检测 --------------------
     console.print("[*] Pre-flight check: probing target AC...")
-    if not fuzzer.is_target_alive():
+    if not fuzzer.is_target_alive(pcap_path=pcap_path):
         console.print(f"[bold red][!] Target AC {target} is not reachable or not running. Aborting.[/bold red]")
         logging.error("Pre-flight check failed: target AC %s did not respond", target)
         raise typer.Exit(code=1)
@@ -157,7 +157,7 @@ def fuzz(
                 # -------------------- Crash 探测 --------------------
                 if probe_interval > 0 and i > 0 and i % probe_interval == 0:
                     logging.info("Probe check at round %d", i + 1)
-                    if not fuzzer.is_target_alive():
+                    if not fuzzer.is_target_alive(pcap_path=pcap_path):
                         raise CrashDetectedError(
                             f"Target stopped responding after round {i}",
                             round_number=i,

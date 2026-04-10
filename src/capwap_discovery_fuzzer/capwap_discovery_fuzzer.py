@@ -11,7 +11,7 @@ from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
 from .errors import *
 
-MUTATION_COUNT = 1  # 每轮发送一条报文
+MUTATION_COUNT = 1  # 每轮发送报文条数
 
 class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
@@ -113,7 +113,7 @@ class CAPWAPDiscoveryFuzzer:
         return response_type, error_type
 
     # -------------------- 存活探测 --------------------
-    def is_target_alive(self, retries: int = 3, probe_timeout: float | None = None) -> bool:
+    def is_target_alive(self, retries: int = 3, probe_timeout: float | None = None, pcap_path: str | None = None) -> bool:
         """Send a valid Discovery Request and check if the target AC responds.
 
         This method is designed as an extension point: subclasses targeting specific
@@ -130,7 +130,10 @@ class CAPWAPDiscoveryFuzzer:
             if all attempts time out or raise a network error.
         """
         timeout = probe_timeout if probe_timeout is not None else self.timeout
-        probe_pkt = self.payload_creator.create_discovery_request(valid=True)
+        if pcap_path:
+            probe_pkt = self.load_request_from_pcap(pcap_path)
+        else:
+            probe_pkt = self.payload_creator.create_discovery_request(valid=True)
         dst = "255.255.255.255" if self.broadcast else self.ac_ip
 
         for attempt in range(1, retries + 1):
@@ -169,7 +172,7 @@ class CAPWAPDiscoveryFuzzer:
         status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
 
         if pcap_path:
-            base_pkt = parse_discovery_request(bytes(self.load_request_from_pcap(pcap_path)))
+            base_pkt = self.load_request_from_pcap(pcap_path)
         else:
             base_pkt = self.payload_creator.create_discovery_request(valid=True)
 

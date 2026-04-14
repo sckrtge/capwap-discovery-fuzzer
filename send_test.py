@@ -48,7 +48,7 @@ def main():
         sys.exit(1)
 
     print(f"[*] 已读取 payload，长度 {len(payload)} 字节")
-    print(f"[*] 前 16 字节: {payload[:16].hex()}")
+    print(f"[*] 完整 hex: {payload.hex()}")
     print(f"[*] 目标: {TARGET_IP}:{TARGET_PORT}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

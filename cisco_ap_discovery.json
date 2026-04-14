@@ -1,0 +1,232 @@
+{
+  "pcap_source": {
+    "packet_index": 1,
+    "sport": 5278,
+    "dport": 5246,
+    "payload_len": 256
+  },
+  "parsed": {
+    "preamble_type": "capwap",
+    "header": {
+      "version": 0,
+      "hlen_words": 4,
+      "hlen_bytes": 16,
+      "rid": 0,
+      "wbid": 1,
+      "wbid_name": "IEEE 802.11",
+      "flags": {
+        "t": false,
+        "f": false,
+        "l": false,
+        "w": false,
+        "m": true,
+        "k": false,
+        "reserved_flags_raw": 0
+      },
+      "fragment_id": 0,
+      "fragment_offset_units": 0,
+      "fragment_offset_bytes": 0,
+      "reserved_raw": 0
+    },
+    "optional_fields": {
+      "radio_mac": {
+        "length": 6,
+        "mac": "10:a8:29:92:61:00",
+        "raw_hex": "10a829926100"
+      }
+    },
+    "payload": {
+      "kind": "control",
+      "header": {
+        "message_type": 1,
+        "message_type_name": "Discovery Request",
+        "enterprise_number": 0,
+        "message_type_value": 1,
+        "sequence_number": 0,
+        "message_element_length": 231,
+        "flags_raw": 0
+      },
+      "elements": [
+        {
+          "type": 20,
+          "type_name": "Discovery Type",
+          "length": 1,
+          "decoded": {
+            "discovery_type": 1,
+            "discovery_type_name": "Static Configuration"
+          }
+        },
+        {
+          "type": 38,
+          "type_name": "WTP Board Data",
+          "length": 67,
+          "decoded": {
+            "vendor_identifier": 4232704,
+            "board_data_sub_elements": [
+              {
+                "type": 0,
+                "type_name": "WTP Model Number",
+                "length": 0,
+                "raw_hex": "",
+                "text": ""
+              },
+              {
+                "type": 0,
+                "type_name": "WTP Model Number",
+                "length": 10,
+                "raw_hex": "43393130354158492d48",
+                "text": "C9105AXI-H"
+              },
+              {
+                "type": 0,
+                "type_name": "WTP Model Number",
+                "length": 1,
+                "raw_hex": "00",
+                "text": "\u0000"
+              },
+              {
+                "error": "truncated board data sub-element",
+                "offset": 21
+              }
+            ],
+            "trailing_hex": "0b46474c323731384c50515900020002ffff0003000e4c696e7578205265766973696f6e0004000610a82901d6b0"
+          }
+        },
+        {
+          "type": 39,
+          "type_name": "WTP Descriptor",
+          "length": 40,
+          "decoded": {
+            "max_radios": 2,
+            "radios_in_use": 2,
+            "num_encrypt_sub_elements": 0,
+            "encryption_sub_elements": [],
+            "descriptor_sub_elements": [
+              {
+                "vendor_identifier": 16793750,
+                "type": 0,
+                "type_name": "Hardware Version",
+                "length": 0,
+                "text": "",
+                "raw_hex": ""
+              },
+              {
+                "vendor_identifier": 262400,
+                "type": 0,
+                "type_name": "Hardware Version",
+                "length": 0,
+                "text": "",
+                "raw_hex": ""
+              },
+              {
+                "vendor_identifier": 1083572224,
+                "type": 1,
+                "type_name": "Active Software Version",
+                "length": 4,
+                "text": "\u0011\u000e\u0000O",
+                "raw_hex": "110e004f"
+              },
+              {
+                "error": "truncated descriptor sub-element",
+                "offset": 28
+              }
+            ],
+            "trailing_hex": "004096000002000401010204"
+          }
+        },
+        {
+          "type": 41,
+          "type_name": "WTP Frame Tunnel Mode",
+          "length": 1,
+          "decoded": {
+            "raw_mode": 4,
+            "native_frame_tunnel": false,
+            "dot3_frame_tunnel": false,
+            "local_bridging": false
+          }
+        },
+        {
+          "type": 44,
+          "type_name": "WTP MAC Type",
+          "length": 1,
+          "decoded": {
+            "mac_type": 1,
+            "mac_type_name": "Split MAC"
+          }
+        },
+        {
+          "type": 45,
+          "type_name": "WTP Name",
+          "length": 16,
+          "decoded": {
+            "wtp_name": "AP10A8.2901.D6B0",
+            "raw_hex": "4150313041382e323930312e44364230"
+          }
+        },
+        {
+          "type": 28,
+          "type_name": "Location Data",
+          "length": 16,
+          "decoded": {
+            "location": "default location",
+            "raw_hex": "64656661756c74206c6f636174696f6e"
+          }
+        },
+        {
+          "type": 1048,
+          "type_name": "IEEE 802.11 WTP Radio Information",
+          "length": 5,
+          "decoded": {
+            "radio_id": 0,
+            "radio_type_raw": 1,
+            "radio_types": {
+              "802.11n": false,
+              "802.11g": false,
+              "802.11a": false,
+              "802.11b": false
+            }
+          }
+        },
+        {
+          "type": 1048,
+          "type_name": "IEEE 802.11 WTP Radio Information",
+          "length": 5,
+          "decoded": {
+            "radio_id": 1,
+            "radio_type_raw": 2,
+            "radio_types": {
+              "802.11n": false,
+              "802.11g": false,
+              "802.11a": false,
+              "802.11b": false
+            }
+          }
+        },
+        {
+          "type": 37,
+          "type_name": "Vendor Specific Payload",
+          "length": 10,
+          "decoded": {
+            "vendor_identifier": 4232704,
+            "element_id": 207,
+            "data_text": "\u0001\u0000\u0000\u0003",
+            "data_hex": "01000003"
+          }
+        },
+        {
+          "type": 37,
+          "type_name": "Vendor Specific Payload",
+          "length": 22,
+          "decoded": {
+            "vendor_identifier": 4232704,
+            "element_id": 5,
+            "data_text": "AP10A8.2901.D6B0",
+            "data_hex": "4150313041382e323930312e44364230"
+          }
+        }
+      ],
+      "payload_trailing_hex": "00000000"
+    },
+    "raw_hex": "00200210000000000610a82992610000000000010000e700001400010100260043004096000000000a43393130354158492d480001000b46474c323731384c50515900020002ffff0003000e4c696e7578205265766973696f6e0004000610a82901d6b000270028020200010040960000000004010000000040960000010004110e004f0040960000020004010102040029000104002c000101002d00104150313041382e323930312e44364230001c001064656661756c74206c6f636174696f6e0418000500000000010418000501000000020025000a0040960000cf01000003002500160040960000054150313041382e323930312e4436423000000000"
+  }
+}

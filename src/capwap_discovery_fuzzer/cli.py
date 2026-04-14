@@ -180,7 +180,7 @@ def fuzz(
 
                 # -------------------- 原版 Fuzzing 模式 --------------------
                 else:
-                    status = fuzzer.fuzzing(pcap_path)
+                    status = fuzzer.fuzzing()
                     for k in ("valid", "timeout", "error", "total"):
                         total_status[k] += status.get(k, 0)
                     for etype, count in status.get("error_types", {}).items():

@@ -2,6 +2,7 @@
 import random
 import logging
 import socket as _socket
+import time
 from pathlib import Path
 from datetime import datetime
 import json
@@ -27,16 +28,36 @@ class CAPWAPDiscoveryFuzzer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_dir = Path("./capwap_log") / timestamp
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.responses_dir = self.log_dir / "responses"
-        self.responses_dir.mkdir(exist_ok=True)
+        self.records_path = self.log_dir / "records.jsonl"
 
         logging.info(f"CAPWAP Fuzzer initialized with seed {self.seed}, log_dir={self.log_dir}")
 
         self.response_parser = ResponseParser()
         self.payload_creator = Payload_Creator(rng=self._rng)
 
+    # -------------------- 会话元数据 --------------------
+    def write_session_json(self, extra: dict | None = None):
+        """写 session.json，记录本次会话的基础参数。extra 可传入 CLI 层的附加信息（vendor、rounds 等）。"""
+        session = {
+            "session_id": self.log_dir.name,
+            "seed": self.seed,
+            "target_ip": self.ac_ip,
+            "target_port": self.ac_port,
+            "broadcast": self.broadcast,
+            "iface": self.iface,
+            "started_at": datetime.now().isoformat(),
+        }
+        if extra:
+            session.update(extra)
+        with open(self.log_dir / "session.json", "w") as f:
+            json.dump(session, f, indent=2)
+
     # -------------------- 发送报文 --------------------
     def send_discovery_request(self, discovery_request):
+        """发送 CAPWAP Discovery Request，返回 (capwap_bytes, raw_response_or_None)。
+        capwap_bytes 是实际发出的 UDP payload（无 IP/UDP 头），供日志和重放直接使用。
+        raw_response 是 recvfrom 返回的完整字节（含 IP/UDP 头），供 ResponseParser 解析。
+        """
         sport = self._rng.randint(20000, 60000)
         dst = "255.255.255.255" if self.broadcast else self.ac_ip
         payload_bytes = bytes(discovery_request)
@@ -47,67 +68,46 @@ class CAPWAPDiscoveryFuzzer:
         sock.bind(('', sport))
         sock.settimeout(self.timeout)
 
-        # 构造用于日志记录的 Scapy 包对象（不用于实际发送）
-        pkt = IP(dst=dst) / UDP(sport=sport, dport=self.ac_port) / discovery_request
-
         try:
             sock.sendto(payload_bytes, (dst, self.ac_port))
-            raw_resp, addr = sock.recvfrom(65535)
-            resp = IP(raw_resp) if raw_resp[0] >> 4 == 4 else Raw(raw_resp)
+            raw_resp, _ = sock.recvfrom(65535)
         except _socket.timeout:
-            resp = None
+            raw_resp = None
         finally:
             sock.close()
 
-        return pkt, resp
+        return payload_bytes, raw_resp
 
-    # -------------------- 转 JSON --------------------
-    def _scapy_to_json(self, pkt):
-        if pkt is None:
-            return None
-        res = {
-            "layer": pkt.name,
-            "fields": {k: (v.hex() if isinstance(v, bytes) else v) for k,v in pkt.fields.items()},
-        }
-        payload = pkt.payload
-        if payload and payload.name != 'NoPayload':
-            res["payload"] = self._scapy_to_json(payload)
-        return res
-
-    # -------------------- 响应分类 --------------------
-    def classify_discovery_response(self, request_pkt, discovery_response, request_info=None):
-        raw_request = bytes(request_pkt)
-        raw_response = bytes(discovery_response) if discovery_response else b""
-
+    # -------------------- 响应分类 + 写 JSONL --------------------
+    def classify_discovery_response(self, capwap_bytes: bytes, raw_response: bytes | None,
+                                     request_info: dict | None = None, elapsed_ms: int | None = None):
+        """分类响应并追加一条记录到 records.jsonl。
+        capwap_bytes: 发出的 CAPWAP payload（无 IP/UDP 头）。
+        raw_response: recvfrom 返回的原始字节（含 IP/UDP 头），None 表示超时。
+        """
         try:
-            parsed = self.response_parser.parse_response(raw_response, request_info)
+            parsed = self.response_parser.parse_response(raw_response or b"", request_info)
             response_type = parsed.get("response_type", "error")
             error_type = parsed.get("error_type", None)
         except NoResponseError:
-            parsed = {}
             response_type = "timeout"
             error_type = "NoResponseError"
         except Exception as e:
-            parsed = {}
             response_type = "error"
             error_type = type(e).__name__
 
-        try:
-            request_structure = self._scapy_to_json(request_pkt)
-        except Exception as e:
-            request_structure = {"error": f"Failed to parse request: {e}"}
-
-        filename = self.responses_dir / f"response_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
-        with open(filename, "w") as f:
-            json.dump({
-                "request_bytes": raw_request.hex(),
-                "request_structure": request_structure,
-                "response_bytes": raw_response.hex(),
-                "parsed_response": parsed,
-                "response_type": response_type,
-                "error_type": error_type,
-                "request_info": request_info
-            }, f, indent=2, default=str)
+        record = {
+            "round": request_info.get("iteration") if request_info else None,
+            "timestamp": datetime.now().isoformat(),
+            "method_chain": request_info.get("method_chain", []) if request_info else [],
+            "response_type": response_type,
+            "error_type": error_type,
+            "request_hex": capwap_bytes.hex(),
+            "response_hex": raw_response.hex() if raw_response else "",
+            "elapsed_ms": elapsed_ms,
+        }
+        with open(self.records_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
 
         logging.info(f"Response Classification: {response_type}, ErrorType: {error_type}")
         return response_type, error_type
@@ -238,8 +238,12 @@ class CAPWAPDiscoveryFuzzer:
             logging.info("Composite Fuzz iteration %d: method chain: %s", i + 1, method_chain)
 
             try:
-                req_pkt, resp = self.send_discovery_request(pkt)
-                resp_type, error_type = self.classify_discovery_response(req_pkt, resp, request_info)
+                t0 = time.monotonic()
+                capwap_bytes, raw_resp = self.send_discovery_request(pkt)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                resp_type, error_type = self.classify_discovery_response(
+                    capwap_bytes, raw_resp, request_info, elapsed_ms=elapsed_ms
+                )
                 status[resp_type] += 1
                 if resp_type == "error" and error_type:
                     status["error_types"].setdefault(error_type, 0)
@@ -255,44 +259,102 @@ class CAPWAPDiscoveryFuzzer:
         logging.info(f"Composite Fuzzing Summary: {status}")
         return status
 
-    # -------------------- 复现单个 JSON --------------------
-    def replay_request_from_json(self, json_path: str, src_port: int | None = None):
-        path = Path(json_path)
-        if not path.exists():
-            raise FileNotFoundError(f"JSON file not found: {json_path}")
-
-        with open(path, "r") as f:
-            data = json.load(f)
-
-        if "request_bytes" not in data:
-            raise ValueError("JSON does not contain 'request_bytes' field")
-
-        raw_payload = bytes.fromhex(data["request_bytes"])
+    # -------------------- 复现单条记录 --------------------
+    def replay_request_from_record(self, record: dict, src_port: int | None = None):
+        """从 records.jsonl 的一条记录重放请求，使用原生 socket（与 fuzzing 路径一致）。"""
+        raw_payload = bytes.fromhex(record["request_hex"])
         sport = src_port or self._rng.randint(20000, 60000)
-        pkt = IP(dst=self.ac_ip)/UDP(sport=sport, dport=self.ac_port)/Raw(load=raw_payload)
+        dst = "255.255.255.255" if self.broadcast else self.ac_ip
 
-        conf.verb = 0
-        resp = sr1(pkt, timeout=self.timeout, verbose=0)
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        if self.broadcast:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+        sock.bind(('', sport))
+        sock.settimeout(self.timeout)
 
-        resp_type, error_type = self.classify_discovery_response(pkt, resp, request_info=data.get("request_info"))
-        return pkt, resp, resp_type, error_type
+        t0 = time.monotonic()
+        try:
+            sock.sendto(raw_payload, (dst, self.ac_port))
+            raw_resp, _ = sock.recvfrom(65535)
+        except _socket.timeout:
+            raw_resp = None
+        finally:
+            sock.close()
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-    # -------------------- 批量复现 JSON 目录 --------------------
-    def replay_requests_from_dir(self, json_dir: str, src_port: int | None = None):
-        path = Path(json_dir)
-        if not path.exists() or not path.is_dir():
-            raise FileNotFoundError(f"JSON directory not found or not a directory: {json_dir}")
+        request_info = {
+            "iteration": record.get("round"),
+            "method_chain": record.get("method_chain", []),
+        }
+        resp_type, error_type = self.classify_discovery_response(
+            raw_payload, raw_resp, request_info, elapsed_ms=elapsed_ms
+        )
+        return resp_type, error_type
+
+    # -------------------- 批量复现 JSONL --------------------
+    def replay_requests_from_jsonl(self, jsonl_path: str, filter_fn=None, src_port: int | None = None):
+        """从 records.jsonl 批量重放。filter_fn(record) -> bool 可按任意字段过滤。
+        例：只重放 error 记录：filter_fn=lambda r: r["response_type"] == "error"
+        """
+        path = Path(jsonl_path)
+        if not path.exists():
+            raise FileNotFoundError(f"JSONL file not found: {jsonl_path}")
 
         results = []
-        json_files = sorted(path.glob("*.json"))
-        if not json_files:
-            raise ValueError(f"No JSON files found in directory: {json_dir}")
-
-        for json_file in json_files:
-            try:
-                pkt, resp, resp_type, error_type = self.replay_request_from_json(str(json_file), src_port=src_port)
-                logging.info(f"Replayed {json_file.name}: response_type={resp_type}, error_type={error_type}")
-                results.append((pkt, resp, resp_type, error_type))
-            except Exception as e:
-                logging.error(f"Failed to replay {json_file.name}: {e}")
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if filter_fn and not filter_fn(record):
+                    continue
+                try:
+                    resp_type, error_type = self.replay_request_from_record(record, src_port=src_port)
+                    logging.info(
+                        "Replayed round %s: response_type=%s, error_type=%s",
+                        record.get("round"), resp_type, error_type
+                    )
+                    results.append((record, resp_type, error_type))
+                except Exception as e:
+                    logging.error("Failed to replay round %s: %s", record.get("round"), e)
         return results
+
+    # -------------------- 写汇总 --------------------
+    def write_summary(self, total_status: dict):
+        """读取 records.jsonl，计算方法有效性和响应时间统计，写入 summary.json。"""
+        method_stats: dict[str, dict] = {}
+        elapsed_list: list[int] = []
+
+        try:
+            with open(self.records_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    r = json.loads(line)
+                    if r.get("elapsed_ms") is not None:
+                        elapsed_list.append(r["elapsed_ms"])
+                    rt = r.get("response_type", "error")
+                    for method in r.get("method_chain", []):
+                        ms = method_stats.setdefault(method, {"uses": 0, "valid": 0, "timeout": 0, "error": 0})
+                        ms["uses"] += 1
+                        ms[rt] = ms.get(rt, 0) + 1
+        except FileNotFoundError:
+            pass
+
+        summary = dict(total_status)
+        summary["method_effectiveness"] = method_stats
+        if elapsed_list:
+            sorted_e = sorted(elapsed_list)
+            p95_idx = int(len(sorted_e) * 0.95)
+            summary["response_time_stats"] = {
+                "mean_ms": int(sum(elapsed_list) / len(elapsed_list)),
+                "min_ms": sorted_e[0],
+                "max_ms": sorted_e[-1],
+                "p95_ms": sorted_e[min(p95_idx, len(sorted_e) - 1)],
+            }
+
+        with open(self.log_dir / "summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+        logging.info("Summary written to %s", self.log_dir / "summary.json")

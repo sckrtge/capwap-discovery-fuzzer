@@ -2,19 +2,22 @@
 
 from capwap_discovery_fuzzer.capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from capwap_discovery_fuzzer.vendors.cisco.creator import CiscoPayloadCreator
+from capwap_discovery_fuzzer.vendors.cisco.response_parser import CiscoResponseParser
 
 
 class CiscoCAPWAPDiscoveryFuzzer(CAPWAPDiscoveryFuzzer):
     """Fuzzer variant for Cisco C9800 WLC.
 
-    Only __init__ is overridden to swap in CiscoPayloadCreator.
-    All fuzzing logic, crash detection, logging, and replay are inherited
-    from CAPWAPDiscoveryFuzzer unchanged.
+    Overrides __init__ to swap in:
+    - CiscoPayloadCreator: builds C9800-compatible Discovery Requests
+    - CiscoResponseParser: accepts MsgType=2 and MsgType=20 as valid,
+      extracts Cisco VSP fields
 
-    Because is_target_alive() calls self.payload_creator.create_discovery_request(valid=True),
-    the Cisco-format probe is sent automatically — no override needed.
+    All other fuzzing logic, crash detection, logging, and replay are
+    inherited from CAPWAPDiscoveryFuzzer unchanged.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.payload_creator = CiscoPayloadCreator(rng=self._rng)
+        self.response_parser = CiscoResponseParser()

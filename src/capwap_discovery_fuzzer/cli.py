@@ -101,7 +101,11 @@ def fuzz(
         raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: cisco")
     fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface)
 
-    # 统一配置 logging，写入 fuzzer 的 log 目录
+    # 统一配置 logging，写入 fuzzer 的 log 目录。
+    # 必须先清除 root logger 上已有的 handlers（fuzzer __init__ 内的 logging 调用
+    # 会触发 lastResort handler 并阻止 basicConfig 生效）。
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
     log_file = fuzzer.log_dir / "fuzzer.log"
     logging.basicConfig(
         filename=str(log_file),
@@ -110,7 +114,7 @@ def fuzz(
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     # 禁止 logging 向 stderr 输出，所有日志只写文件
-    logging.getLogger().handlers = [h for h in logging.getLogger().handlers if isinstance(h, logging.FileHandler)]
+    root_logger.handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
 
     pcap_path = str(pcap.expanduser().resolve()) if pcap else None
 

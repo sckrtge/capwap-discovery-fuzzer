@@ -11,7 +11,7 @@ from datetime import datetime
 
 from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from .errors import CrashDetectedError
-from .vendors import get_vendor
+from .vendors import get_vendor, DEFAULT_VENDOR
 
 app = typer.Typer()
 console = Console()
@@ -97,9 +97,13 @@ def fuzz(
         )
     ),
     vendor: str = typer.Option(
-        None,
+        DEFAULT_VENDOR,
         '--vendor',
-        help='Vendor-specific mode (e.g. "cisco" for Cisco C9800 WLC). Omit for generic mode.'
+        help=(
+            'Vendor mode. Default: "opencapwap" (gray-box, auto-detects AC process). '
+            '"cisco" for Cisco C9800 WLC. '
+            '"generic" for plain black-box mode (base class, no process monitoring).'
+        )
     )
 ):
     """Run CAPWAP Discovery fuzzing or replay records.jsonl for crash reproduction"""
@@ -114,9 +118,10 @@ def fuzz(
         seed = int(time.time_ns())
 
     # 初始化 Fuzzer（log_dir 在内部创建）
-    fuzzer_cls = get_vendor(vendor) if vendor else CAPWAPDiscoveryFuzzer
-    if vendor and fuzzer_cls is None:
-        raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: cisco")
+    fuzzer_cls = get_vendor(vendor)
+    if fuzzer_cls is None:
+        supported = "opencapwap, cisco, generic"
+        raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: {supported}")
     fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface)
 
     # 统一配置 logging，写入 fuzzer 的 log 目录。

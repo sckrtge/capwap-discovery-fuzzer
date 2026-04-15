@@ -464,13 +464,20 @@ class Payload_Fuzzer:
 
     def _raw_to_pkt(self, raw: bytearray, original: Packet) -> Packet:
         """
-        Deserialise raw bytes back to a Scapy packet.  Falls back to the
-        original packet on empty input.
-        将原始字节反序列化为 Scapy 数据包；输入为空时回退到原始包。
+        Wrap mutated bytes in a Raw packet without re-parsing.  Brutal methods
+        corrupt structure intentionally, so re-dissecting with Scapy would either
+        fail (struct.unpack errors on truncated data) or silently mis-interpret
+        fields.  Raw(bytes) is always safe and bytes(pkt) still works downstream.
+        Falls back to the original packet on empty input.
+
+        将变异后的字节封装为 Raw 包，不再重新解析。暴力变异方法会故意破坏包结构，
+        用 Scapy 重新解析会在截断数据上导致 struct.unpack 失败，或静默误判字段。
+        Raw(bytes) 始终安全，下游 bytes(pkt) 依然正常工作。
+        输入为空时回退到原始包。
         """
         if len(raw) == 0:
             return original
-        return IP(bytes(raw)) if raw[0] >> 4 == 4 else original.__class__(bytes(raw))
+        return Raw(bytes(raw))
 
     def brutal_random_bytes(self, pkt: Packet) -> Packet:
         """

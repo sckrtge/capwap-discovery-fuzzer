@@ -174,16 +174,6 @@ AC 能正常处理并回复 Discovery Response 的方法（valid 响应）：
 
 大多数 brutal 方法（`brutal_fill_segment`、`brutal_zero_segment` 等）有效率为 0%，说明字节级破坏后 AC 完全无法解析。
 
-### 4.7 新发现：`unpack requires a buffer of N bytes` 错误
-
-会话1（第58轮）、会话3（第127、161、342、411轮）均出现：
-```
-Round X error: unpack requires a buffer of 2 bytes
-Round X error: unpack requires a buffer of 1 bytes
-```
-
-这是 **fuzzer 侧的 ResponseParser 错误**，AC 回包结构畸形导致 Python struct 解包失败。说明 AC 在部分异常输入下会回复**长度不完整或结构破损的 CAPWAP 报文**，是潜在的响应异常漏洞，值得进一步分析。
-
 ---
 
 ## 5. 图表
@@ -253,7 +243,6 @@ Round X error: unpack requires a buffer of 1 bytes
 | VULN-01 | DoS（WTP 计数绕过） | 极易（通用畸形包即触发） | 合法 AP 无法接入 |
 | VULN-02 | 累积性内存泄漏 → Crash | 中（需约 50~100 轮） | AC 进程崩溃，服务中断 |
 | VULN-03 | 单包/少包直接 Crash | 较易（10轮内） | AC 进程崩溃，服务中断 |
-| VULN-04 | 异常响应包（畸形回包） | 被动触发（解析AC回包时发现） | 潜在客户端侧漏洞 |
 
 ---
 
@@ -281,12 +270,11 @@ echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_
 
 ## 8. 结论
 
-本次实验成功复现并量化了 OpenCAPWAP AC 的两个已知安全漏洞，并发现了两个新问题：
+本次实验成功复现并量化了 OpenCAPWAP AC 的两个已知安全漏洞，并发现了一个新问题：
 
 1. **VULN-01（DoS）**：100% 复现率（3/3次实验均触发），通用畸形 Discovery Request 即可耗尽 WTP 槽位。
 2. **VULN-02（累积性 Crash）**：在会话1（90轮）中稳定复现，进程段错误。
 3. **VULN-03（极早 Crash）**：会话2 仅 10 轮即触发段错误，存在低轮次直接崩溃路径。
-4. **VULN-04（异常回包）**：多次出现 AC 回复结构损坏的 CAPWAP 报文（ResponseParser 解包失败），表明 AC 序列化逻辑存在缺陷。
 
 OpenCAPWAP AC 在面对畸形 CAPWAP Discovery Request 时存在严重的健壮性问题，不具备生产级可靠性。
 

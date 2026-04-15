@@ -5,8 +5,8 @@ CAPWAP header note:
   The existing CAPWAP_Header Scapy class only covers the fixed 8-byte base.
   We insert the 8-byte optional MAC field as a Raw layer between CAPWAP_Header
   and Control_Header.  Scapy's getlayer() traverses through Raw, so all safe
-  fuzz methods (fuzz_capwap_header, fuzz_control_header, fuzz_any_msg_*) still
-  work correctly on the resulting packet.
+  fuzz methods (fuzz_capwap_header, fuzz_ctrl_*, fuzz_elem_*) still work
+  correctly on the resulting packet.
 
 Element order matches the real AP capture (cisco_ap_discovery.json):
   Type 20 → 38 → 39 → 41 → 44 → 45 → 28 → 1048 × 2 → 37(VSP207) → 37(VSP5)

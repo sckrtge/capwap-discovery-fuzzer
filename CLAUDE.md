@@ -505,11 +505,152 @@ kill -0 <pid>
 
 **注**：源码根因分析待实验数据收集完成后进行。
 
-### 实施顺序
+### 实施顺序（已全部完成，2026-04-15）
 
-1. `vendors/opencapwap/fuzzer.py`（PID 自动检测 + 进程监控侧车 + `is_target_alive()` 覆盖）
-2. `vendors/__init__.py`：新增 opencapwap 映射，默认 vendor 改为 opencapwap
-3. `cli.py`：`--vendor` 默认值改为 `"opencapwap"`
-4. `capwap_discovery_fuzzer.py`：新增 `write_crash_sequence()`，`write_summary()` 增强
-5. `tools/analyze_results.py`
-6. `tools/compare_sessions.py`
+1. ✅ `vendors/opencapwap/fuzzer.py`（PID 自动检测 + 进程监控侧车 + `is_target_alive()` 覆盖）
+2. ✅ `vendors/__init__.py`：新增 opencapwap 映射，默认 vendor 改为 opencapwap
+3. ✅ `cli.py`：`--vendor` 默认值改为 `"opencapwap"`，接入监控生命周期
+4. ✅ `capwap_discovery_fuzzer.py`：新增 `write_crash_sequence()`，`write_summary()` 增强
+5. ✅ `tools/analyze_results.py`
+6. ✅ `tools/compare_sessions.py`
+
+---
+
+## 当前完整目录结构（2026-04-15）
+
+```
+src/capwap_discovery_fuzzer/
+├── __main__.py
+├── capwap_discovery_fuzzer.py   # 主 Fuzzer 类
+├── cli.py                       # Typer CLI 入口
+├── errors.py                    # 异常层级
+├── payload_fuzzer.py            # 21 个 safe + 10 个 brutal 变异方法
+├── request_creater.py           # Scapy 报文类 + Payload_Creator
+├── response_parser.py           # 响应解析与分类
+├── utils.py
+└── vendors/
+    ├── __init__.py              # get_vendor() + DEFAULT_VENDOR="opencapwap"
+    ├── base.py
+    ├── cisco/
+    │   ├── creator.py           # CiscoPayloadCreator
+    │   ├── elements.py          # Cisco 常量 + raw bytes
+    │   ├── fuzzer.py            # CiscoCAPWAPDiscoveryFuzzer
+    │   └── response_parser.py   # CiscoResponseParser
+    └── opencapwap/
+        ├── __init__.py
+        └── fuzzer.py            # OpenCAPWAPFuzzer（灰盒）
+
+tools/
+├── analyze_results.py           # 单会话分析 + 5 张图表
+└── compare_sessions.py          # 多会话对比 + 6 张图表/CSV
+
+run_fuzzing_opencapwap.sh        # 一键启动 AC + fuzzing 复合脚本
+```
+
+---
+
+## 实验流程（毕设标准流程）
+
+### 环境说明
+
+- OpenCAPWAP AC 目录：`/home/gxm/projects/openCAPWAP-ubuntu2404/`
+- AC 监听地址：`192.168.33.128:5246`（loopback 可达）
+- Python venv：`/home/gxm/projects/.venv/bin/python`
+- sudo 密码：`123123`
+
+### 第一阶段：正式模糊测试（建议 3 次独立实验）
+
+每次实验前 AC 进程必须重新启动（保证状态干净）：
+
+```bash
+# 方式一：一键脚本（推荐）
+bash run_fuzzing_opencapwap.sh
+```
+
+或手动：
+
+```bash
+# 1. 启动 AC
+cd /home/gxm/projects/openCAPWAP-ubuntu2404
+echo "123123" | sudo -S killall -9 AC 2>/dev/null || true
+sleep 1
+echo "123123" | sudo -S ./AC . &>/tmp/opencapwap_ac.log &
+sleep 3
+
+# 2. 启动 fuzzer（回到 fuzzer 目录）
+cd /home/gxm/projects/fuzzing/capwap-discovery-fuzzer
+echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.33.128 \
+    --rounds 500 \
+    --timeout 3 \
+    --sleep 0.5 \
+    --iface lo \
+    --probe-interval 10 \
+    --on-probe-fail continue \
+    --vendor opencapwap
+```
+
+建议每次使用不同 `--seed` 或不传（自动随机），确保 3 次实验独立。
+
+### 第二阶段：生成单会话图表
+
+```bash
+# 替换为实际时间戳
+/home/gxm/projects/.venv/bin/python tools/analyze_results.py \
+    capwap_log/<timestamp>/
+
+# 图表输出到 ./charts/<timestamp>/
+# 包含：响应类型饼图、方法有效性柱状图、响应时间折线图、
+#       内存趋势折线图、CPU 折线图（如有 process_monitor.csv）
+```
+
+### 第三阶段：多会话对比
+
+```bash
+# 对比所有 opencapwap 会话
+/home/gxm/projects/.venv/bin/python tools/compare_sessions.py \
+    capwap_log/ --vendor opencapwap
+
+# 输出到 ./charts/compare_Nsessions/
+# 包含：session_overview、mttc_comparison、method_heatmap、
+#       memory_overlay、response_time_overlay、sessions_table.csv
+```
+
+### 第四阶段：崩溃复现
+
+```bash
+# 重启 AC
+cd /home/gxm/projects/openCAPWAP-ubuntu2404
+echo "123123" | sudo -S ./AC . &>/tmp/opencapwap_ac.log &
+sleep 3
+
+# 用崩溃前驱序列重放
+cd /home/gxm/projects/fuzzing/capwap-discovery-fuzzer
+echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.33.128 \
+    --vendor opencapwap \
+    --replay-jsonl capwap_log/<crash_session>/crash_sequence.jsonl
+```
+
+### 第五阶段：源码根因分析（实验数据收集完成后）
+
+目标文件（OpenCAPWAP 源码）：
+- `ACDiscoveryState.c` — Discovery 状态机，现象一计数逻辑
+- `ACProtocol.c` / `CWProtocol.c` — 报文解析，现象二内存问题
+- `CWAC.h` — `gActiveWTPs` / `gMaxWTPs` 全局变量定义
+
+分析要点：
+1. 现象一：`gActiveWTPs++` 在 Discovery 阶段何时被调用，是否在合法性检查之前
+2. 现象二：`malloc`/`realloc` 是否有对应 `free`，报文解析路径上是否存在提前返回导致内存未释放
+
+### 关键输出文件说明
+
+| 文件 | 论文用途 |
+|------|------|
+| `process_monitor.csv` | 内存泄漏趋势图（最核心的漏洞证据） |
+| `summary.json` `.method_effectiveness` | 变异方法有效性分析表 |
+| `crash_sequence.jsonl` | 崩溃触发序列，用于复现实验章节 |
+| `suspected_event.json` | DoS 事件时间点记录 |
+| `charts/*/method_heatmap.png` | 多会话方法有效性热力图 |
+| `charts/*/mttc_comparison.png` | MTTC 可重复性验证图 |
+| `charts/*/process_memory.png` | 内存增长曲线（含崩溃标记线） |

@@ -16,12 +16,12 @@ A fuzzing tool for CAPWAP (Control And Provisioning of Wireless Access Points) D
 
 - **Unicast and broadcast modes** — target a specific AC IP or send to `255.255.255.255`
   **单播与广播模式** — 指定目标 AC IP 或向 `255.255.255.255` 广播
-- **Structured mutations** — fuzz CAPWAP/Control headers, message element types/lengths/values, flags, element ordering
-  **结构化变异** — 对 CAPWAP/Control 头部、消息元素类型/长度/值、标志位、元素顺序进行模糊测试
-- **Byte-level mutations** — random overwrites, insertions, deletions, shuffles, segment duplication/reversal
-  **字节级变异** — 随机覆写、插入、删除、乱序、片段复制/反转
-- **Chained mutations** — each round applies 1–3 structured mutations followed by 0–3 byte-level mutations
-  **链式变异** — 每轮依次施加 1–3 次结构化变异和 0–3 次字节级变异
+- **Structured mutations** — 21 named methods covering CAPWAP/Control header fields, all message element TLV fields, element structure operations, and flag combinations; each method targets a specific protocol field so logs are directly interpretable
+  **结构化变异** — 21 个具名方法，覆盖 CAPWAP/Control 头部字段、消息元素 TLV 字段、元素结构操作及标志位组合；每个方法针对特定协议字段，日志可直接判断变异位置
+- **Byte-level mutations** — 10 methods: random overwrites, bit flips, insertions, deletions, segment zero-fill/repeat-fill, duplication, reversal, shuffle, and truncation
+  **字节级变异** — 10 个方法：随机覆写、位翻转、插入、删除、区间清零/填充、片段复制/反转、全字节乱序、截断
+- **Chained mutation strategy** — structured mutations first (Scapy-parseable), byte-level after (structure destroyed); allows repeated method selection for multi-element coverage; `brutal_shuffle_bytes` forced to chain end
+  **链式变异策略** — 结构化变异在前（Scapy 可解析），字节级在后（结构已破坏）；允许重复选取方法实现多元素覆盖；`brutal_shuffle_bytes` 强制为链末步骤
 - **Reproducible runs** — seed-controlled RNG; every result written to `records.jsonl`
   **可复现运行** — 种子控制随机数；所有结果写入 `records.jsonl`
 - **Structured JSONL logging** — one record per round with round number, timestamp, method chain, response type, hex payload, and elapsed time; load directly with `pandas` for analysis and charting
@@ -141,6 +141,61 @@ sudo python -m capwap_discovery_fuzzer \
 | `--iface` | `lo` | Network interface / 网络接口 |
 | `--probe-interval` | `10` | Check target liveness every N rounds; 0 = disabled. Exits with code 2 and saves `crash_report.json` on crash / 每 N 轮探测目标存活；0 为禁用；崩溃时退出码为 2 并保存 `crash_report.json` |
 | `--vendor` | — | Vendor-specific mode, e.g. `cisco` for Cisco C9800 WLC / 厂商模式，如 `cisco` |
+
+---
+
+## Fuzzing Strategy / 变异策略
+
+Each fuzzing round constructs one mutated packet and sends it to the target AC.  The mutation pipeline has two sequential stages — structured mutations must complete before byte-level mutations begin, because byte-level operations destroy the Scapy layer structure that structured methods depend on.
+
+每轮 fuzzing 构造一个变异报文发送给目标 AC。变异流水线分两个顺序阶段——结构化变异必须在字节级变异之前完成，因为字节级操作会破坏结构化方法所依赖的 Scapy 层结构。
+
+```
+base_pkt ──► [structured mutations]* ──► [byte-level mutations]* ──► send
+```
+
+### Stage 1 — Structured mutations / 第一阶段：结构化变异
+
+Methods are selected by `random.choices` (repetition allowed) so the same method can be applied multiple times in one round (e.g. `fuzz_elem_value` can corrupt two different elements).  The selected methods are then sorted into a fixed execution order to respect field dependencies:
+
+方法通过 `random.choices`（允许重复）选取，同一方法可在一轮内多次应用（如 `fuzz_elem_value` 可在同一轮内破坏两个不同元素）。选出的方法按固定顺序执行以保证字段依赖关系：
+
+| Order / 顺序 | Group / 分组 | Methods / 方法 |
+|:---:|---|---|
+| 1 | CAPWAP Header fields | `fuzz_capwap_header`, `fuzz_capwap_wbid`, `fuzz_capwap_flags`, `fuzz_capwap_fragment` |
+| 2 | Control Header fields | `fuzz_ctrl_msgtype`, `fuzz_ctrl_seqnum`, `fuzz_ctrl_msgelemslen`, `fuzz_ctrl_flags` |
+| 3 | Element field mutations | `fuzz_elem_type`, `fuzz_elem_length`, `fuzz_elem_length_zero`, `fuzz_elem_length_overflow`, `fuzz_elem_value`, `fuzz_elem_value_by_type(38)`, `fuzz_elem_value_by_type(39)` |
+| 4 | Element insert | `fuzz_elem_insert_unknown` |
+| 5 | Element structure | `fuzz_elem_drop`, `fuzz_elem_drop_required`, `fuzz_elem_duplicate`, `fuzz_elem_order_shuffle` |
+
+Ordering rationale / 排序理由：
+- CAPWAP Header first because `Hlen` determines the offset of every subsequent layer.
+  CAPWAP 头部最先，因为 `Hlen` 决定后续所有层的偏移量。
+- Insert before shuffle so newly inserted unknown elements also participate in reordering.
+  Insert 先于 shuffle，使新插入的未知元素也参与乱序。
+
+### Stage 2 — Byte-level mutations / 第二阶段：字节级变异
+
+Selected by `random.choices` (repetition allowed).  75% of rounds include at least one byte-level mutation; 25% are structured-only (useful for protocol compliance testing).
+
+通过 `random.choices`（允许重复）选取。75% 的轮次至少包含一次字节级变异；25% 为纯结构化轮次（用于协议合规性测试）。
+
+| Method / 方法 | What it does / 操作说明 |
+|---|---|
+| `brutal_random_bytes` | Overwrite ~10% of bytes at random positions / 随机位置覆写约 10% 的字节 |
+| `brutal_bitflip` | XOR 1–8 random bytes with a single-bit mask / 对 1–8 个随机字节做单比特 XOR 翻转 |
+| `brutal_insert_random_bytes` | Insert 1–5 bursts of random bytes / 插入 1–5 段随机字节 |
+| `brutal_delete_random_bytes` | Delete 1–5 individual bytes / 删除 1–5 个字节 |
+| `brutal_zero_segment` | Zero-fill a random contiguous segment / 随机区间清零 |
+| `brutal_fill_segment` | Fill a random segment with a repeated byte (0xFF, 0xAA…) / 随机区间填充单一字节值 |
+| `brutal_duplicate_segment` | Copy a segment and insert it elsewhere / 复制一段字节并插入到随机位置 |
+| `brutal_reverse_segment` | Reverse byte order of a random segment / 反转随机区间的字节顺序 |
+| `brutal_truncate` | Drop all bytes after a random cut point / 从随机偏移处截断报文 |
+| `brutal_shuffle_bytes` | Shuffle ALL bytes (terminal — always last) / 全字节乱序（终结步，强制为链末） |
+
+`brutal_shuffle_bytes` is **always the last step** in the byte-level chain.  If it is selected alongside other brutal methods, the others execute first; shuffle executes last.  Any method after a full shuffle would have no additional effect.
+
+`brutal_shuffle_bytes` **始终是字节级链的最后一步**。若与其他 brutal 方法同时被选中，其他方法先执行，shuffle 最后执行。全字节乱序后再执行任何方法均无额外效果。
 
 ---
 

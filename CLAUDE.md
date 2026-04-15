@@ -654,3 +654,78 @@ echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_
 | `charts/*/method_heatmap.png` | 多会话方法有效性热力图 |
 | `charts/*/mttc_comparison.png` | MTTC 可重复性验证图 |
 | `charts/*/process_memory.png` | 内存增长曲线（含崩溃标记线） |
+
+---
+
+## 实验进展（2026-04-15）
+
+### 已完成
+
+**阶段一～三（数据收集 + 图表）：已全部完成。**
+
+3 次独立 OpenCAPWAP 灰盒实验已跑完，结果写入 `experiments/opencapwap/experiment_report.md`。
+
+| 会话 ID | 轮次 | 崩溃轮次 | DoS 事件 | 内存增长 |
+|---------|------|---------|---------|---------|
+| 20260415_165736 | 89 | 第90轮（Segfault） | 第20轮触发，第70轮恢复 | +1188 KB |
+| 20260415_170825 | 10 | 第10轮（Segfault） | 无 | +104 KB |
+| 20260415_170915 | 494 | 未崩溃 | 第30轮触发，第180轮恢复 | +1640 KB |
+
+**已确认漏洞（3个）：**
+
+| 漏洞 | 类型 | 描述 |
+|------|------|------|
+| VULN-01 | DoS | 畸形 Discovery Request 导致 `gActiveWTPs` 耗尽（100% 复现） |
+| VULN-02 | 累积性 Crash | 持续发包内存泄漏，约 90 轮后 Segfault |
+| VULN-03 | 极早直接 Crash | 特定方法组合 10 轮内即触发 Segfault |
+
+**代码修复（同步提交）：**
+- `records.jsonl` 轮次编号全为 1 的 bug（`round_number` 参数链路）
+- `continue` 模式无法区分 DoS 和 Crash 的逻辑（新增 `is_process_alive()`）
+- `_raw_to_pkt` 暴力变异后不再重新解析，改为 `Raw(bytes(raw))` 避免 struct.unpack 异常
+
+### 下一步：漏洞复现（阶段四）
+
+目标：对三个漏洞分别设计定向复现实验，验证可重复触发，并为论文提供复现章节的证据。
+
+#### VULN-01 复现（DoS）
+
+通过 `replay-jsonl` 重放会话1的前 30 条记录（DoS 触发前驱），观察 AC 日志中 "Too many WTPs" 是否重现：
+
+```bash
+cd /home/gxm/projects/openCAPWAP-ubuntu2404
+echo "123123" | sudo -S killall -9 AC 2>/dev/null || true; sleep 1
+echo "123123" | sudo -S ./AC . &>/tmp/opencapwap_ac.log &
+sleep 3
+
+cd /home/gxm/projects/fuzzing/capwap-discovery-fuzzer
+echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.33.128 --vendor opencapwap \
+    --replay-jsonl capwap_log/20260415_165736/crash_sequence.jsonl
+```
+
+判断标准：`grep "Too many WTPs" /tmp/opencapwap_ac.log`
+
+#### VULN-02/03 复现（Crash）
+
+重放对应 crash_sequence.jsonl，观察 AC 进程是否再次 Segfault：
+
+```bash
+# VULN-02（会话1）
+echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.33.128 --vendor opencapwap \
+    --replay-jsonl capwap_log/20260415_165736/crash_sequence.jsonl
+
+# VULN-03（会话2）
+echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.33.128 --vendor opencapwap \
+    --replay-jsonl capwap_log/20260415_170825/crash_sequence.jsonl
+```
+
+判断标准：shell 报告 `段错误`，`process_monitor.csv` 中 `pid_alive` 变为 False。
+
+#### 注意事项
+
+- 复现前必须重启 AC（`killall -9 AC`）
+- 复现结果记录到 `experiments/opencapwap/experiment_report.md` 第7节
+- 复现成功后进入**阶段五（源码根因分析）**

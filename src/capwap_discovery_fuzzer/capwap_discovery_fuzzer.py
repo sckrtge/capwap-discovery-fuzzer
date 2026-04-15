@@ -178,20 +178,34 @@ class CAPWAPDiscoveryFuzzer:
 
         fuzzer = Payload_Fuzzer(base_pkt)
 
-        def fuzz_msg_38(pkt=None): return fuzzer.fuzz_specific_msg(38, pkt)
-        def fuzz_msg_39(pkt=None): return fuzzer.fuzz_specific_msg(39, pkt)
+        def fuzz_elem_value_type38(pkt=None): return fuzzer.fuzz_elem_value_by_type(38, pkt)
+        def fuzz_elem_value_type39(pkt=None): return fuzzer.fuzz_elem_value_by_type(39, pkt)
 
         safe_methods = [
+            # CAPWAP Header mutations / CAPWAP 头部变异
             fuzzer.fuzz_capwap_header,
-            fuzzer.fuzz_control_header,
-            fuzzer.fuzz_any_msg_length,
-            fuzzer.fuzz_any_msg_value,
-            fuzz_msg_38,
-            fuzz_msg_39,
-            fuzzer.fuzz_duplicate_msg,
-            fuzzer.fuzz_drop_last_msg,
-            fuzzer.fuzz_shuffle_msgs,
+            fuzzer.fuzz_capwap_wbid,
             fuzzer.fuzz_capwap_flags,
+            fuzzer.fuzz_capwap_fragment,
+            # Control Header mutations / Control 头部变异
+            fuzzer.fuzz_ctrl_msgtype,
+            fuzzer.fuzz_ctrl_seqnum,
+            fuzzer.fuzz_ctrl_msgelemslen,
+            fuzzer.fuzz_ctrl_flags,
+            # MessageElement field mutations / 消息元素字段变异
+            fuzzer.fuzz_elem_type,
+            fuzzer.fuzz_elem_length,
+            fuzzer.fuzz_elem_length_zero,
+            fuzzer.fuzz_elem_length_overflow,
+            fuzzer.fuzz_elem_value,
+            fuzz_elem_value_type38,
+            fuzz_elem_value_type39,
+            # MessageElement structural mutations / 消息元素结构变异
+            fuzzer.fuzz_elem_insert_unknown,
+            fuzzer.fuzz_elem_drop,
+            fuzzer.fuzz_elem_drop_required,
+            fuzzer.fuzz_elem_duplicate,
+            fuzzer.fuzz_elem_order_shuffle,
         ]
 
         brutal_methods = [
@@ -199,37 +213,71 @@ class CAPWAPDiscoveryFuzzer:
             fuzzer.brutal_insert_random_bytes,
             fuzzer.brutal_delete_random_bytes,
             fuzzer.brutal_shuffle_bytes,
-            fuzzer.brutal_duplicate_segments,
+            fuzzer.brutal_duplicate_segment,
             fuzzer.brutal_reverse_segment,
+            fuzzer.brutal_bitflip,
+            fuzzer.brutal_zero_segment,
+            fuzzer.brutal_fill_segment,
+            fuzzer.brutal_truncate,
         ]
 
+        # brutal_shuffle_bytes destroys all structure; any brutal method after it
+        # is redundant.  Keep it in the pool but enforce it as the terminal step.
+        # brutal_shuffle_bytes 彻底破坏结构，其后的任何 brutal 方法均无额外价值，
+        # 保留在池中但强制作为 brutal 链的最后一步。
+        TERMINAL_BRUTAL = {fuzzer.brutal_shuffle_bytes}
+
         def sort_key(method):
+            # Enforce safe-method execution order:
+            #   1. CAPWAP Header fields  (must come first — Hlen affects parsing of everything below)
+            #   2. Control Header fields (depend on correct CAPWAP Header)
+            #   3. Element field mutations (Type / Length / Value — operate on existing elements)
+            #   4. Element structural mutations (insert / drop / duplicate / shuffle order)
+            #      insert_unknown must precede order_shuffle so the new element participates in shuffle
+            #
+            # 强制 safe 方法执行顺序：
+            #   1. CAPWAP 头字段（最先 — Hlen 影响后续所有层的解析）
+            #   2. Control 头字段（依赖正确的 CAPWAP Header）
+            #   3. 元素字段变异（Type / Length / Value — 对现有元素操作）
+            #   4. 元素结构变异（insert / drop / duplicate / shuffle — insert 必须先于 shuffle）
             name = getattr(method, "__name__", str(method))
-            if "capwap_header" in name or "control_header" in name:
+            if "capwap_" in name:
                 return 0
-            elif "length" in name or "value" in name or "msg_3" in name or "capwap_flags" in name:
+            elif "ctrl_" in name:
                 return 1
-            elif "duplicate_msg" in name or "drop_last_msg" in name:
+            elif "elem_length" in name or "elem_value" in name or "elem_type" in name:
                 return 2
-            elif "shuffle" in name:
+            elif "elem_insert" in name:
                 return 3
-            else:
+            elif "elem_drop" in name or "elem_duplicate" in name or "elem_order" in name:
                 return 4
+            else:
+                return 5
 
         for i in range(MUTATION_COUNT):
             pkt = base_pkt.copy()
             method_chain = []
 
-            num_safe = self._rng.randint(1, min(max_safe_methods, len(safe_methods)))
-            chosen_safe = self._rng.sample(safe_methods, num_safe)
+            # Allow repeated selection so methods like fuzz_elem_value can mutate
+            # multiple different elements in a single round.
+            # 允许重复选取，使 fuzz_elem_value 等方法能在同一轮内变异多个不同元素。
+            num_safe = self._rng.randint(1, max_safe_methods)
+            chosen_safe = self._rng.choices(safe_methods, k=num_safe)
             chosen_safe.sort(key=sort_key)
 
             for method in chosen_safe:
                 pkt = method(pkt)
                 method_chain.append(getattr(method, "__name__", str(method)))
 
-            num_brutal = self._rng.randint(0, max_brutal_methods)
+            # brutal_shuffle_bytes is terminal: if selected, move it to the end and
+            # drop any brutal methods that were chosen after it (they'd be no-ops).
+            # brutal_shuffle_bytes 是终结步：若被选中，移至末尾并丢弃其后的方法。
+            num_brutal = self._rng.randint(1 if self._rng.random() < 0.75 else 0, max_brutal_methods)
             chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)
+            if any(m in TERMINAL_BRUTAL for m in chosen_brutal):
+                chosen_brutal = [m for m in chosen_brutal if m not in TERMINAL_BRUTAL]
+                chosen_brutal.append(fuzzer.brutal_shuffle_bytes)
+
             for method in chosen_brutal:
                 pkt = method(pkt)
                 method_chain.append(getattr(method, "__name__", str(method)))
@@ -358,3 +406,50 @@ class CAPWAPDiscoveryFuzzer:
         with open(self.log_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
         logging.info("Summary written to %s", self.log_dir / "summary.json")
+
+    # -------------------- 疑似事件记录 --------------------
+    def write_suspected_event(self, round_number: int, total_status: dict):
+        """Write suspected_event.json on the first probe failure.
+
+        Called only once per session (enforced by the caller).  Records the
+        round number and timestamp of the first failure with type='unknown'
+        — it is unknown at this point whether the cause is a crash or DoS.
+
+        首次探测失败时写入 suspected_event.json（由调用方保证只调用一次）。
+        此时尚无法区分崩溃还是 DoS，type 置为 'unknown'。
+        """
+        event = {
+            "type": "unknown",
+            "first_fail_round": round_number,
+            "timestamp": datetime.now().isoformat(),
+            "probe_attempts": 3,
+            "ac_ip": self.ac_ip,
+            "ac_port": self.ac_port,
+            "total_status_at_fail": dict(total_status),
+        }
+        path = self.log_dir / "suspected_event.json"
+        with open(path, "w") as f:
+            json.dump(event, f, indent=2)
+        logging.warning("suspected_event.json written at round %d", round_number)
+
+    def update_suspected_event_recovered(self, round_number: int):
+        """Update suspected_event.json when the target recovers after a failure.
+
+        Reads the existing file and appends recovery information, changing
+        type to 'dos_suspected'.  If the file does not exist (e.g. probe_fail
+        mode was 'stop'), this is a no-op.
+
+        目标在失败后恢复响应时更新 suspected_event.json，追加恢复信息并将
+        type 改为 'dos_suspected'。若文件不存在则静默忽略。
+        """
+        path = self.log_dir / "suspected_event.json"
+        if not path.exists():
+            return
+        with open(path) as f:
+            event = json.load(f)
+        event["type"] = "dos_suspected"
+        event["recovered_at_round"] = round_number
+        event["recovery_timestamp"] = datetime.now().isoformat()
+        with open(path, "w") as f:
+            json.dump(event, f, indent=2)
+        logging.info("suspected_event.json updated: target recovered at round %d (dos_suspected)", round_number)

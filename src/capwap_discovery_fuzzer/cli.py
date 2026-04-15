@@ -86,6 +86,16 @@ def fuzz(
         help='Check target liveness every N rounds (0 = disabled). On crash: saves crash_report.json and exits with code 2.',
         min=0
     ),
+    on_probe_fail: str = typer.Option(
+        'continue',
+        '--on-probe-fail',
+        help=(
+            'Action when a liveness probe fails: '
+            '"continue" (default) keeps fuzzing and records a suspected_event.json; '
+            '"stop" halts immediately (original behaviour). '
+            'In continue mode, 3 consecutive probe failures trigger a definitive crash stop.'
+        )
+    ),
     vendor: str = typer.Option(
         None,
         '--vendor',
@@ -96,6 +106,9 @@ def fuzz(
 
     if not broadcast and not ac_ip:
         raise typer.BadParameter("Either --ac-ip (unicast) or --broadcast must be specified")
+
+    if on_probe_fail not in ("continue", "stop"):
+        raise typer.BadParameter("--on-probe-fail must be 'continue' or 'stop'")
 
     if seed is None:
         seed = int(time.time_ns())
@@ -195,21 +208,85 @@ def fuzz(
 
             crash_error: CrashDetectedError | None = None
 
+            # Probe failure tracking for "continue" mode
+            # "continue" 模式下的探测失败状态跟踪
+            consecutive_probe_failures = 0
+            suspected_recorded = False          # suspected_event.json 只写一次
+            first_fail_round: int | None = None
+            MAX_CONSECUTIVE_FAILURES = 3        # 连续失败超过此值视为 crash
+
             for i in range(rounds):
                 try:
                     logging.info(f"Starting round {i + 1}/{rounds}")
 
-                    # -------------------- Crash 探测 --------------------
+                    # -------------------- 存活探测 --------------------
                     if probe_interval > 0 and i > 0 and i % probe_interval == 0:
                         logging.info("Probe check at round %d", i + 1)
-                        if not fuzzer.is_target_alive(pcap_path=pcap_path):
-                            raise CrashDetectedError(
-                                f"Target stopped responding after round {i}",
-                                round_number=i,
-                                probe_attempts=3,
-                                ac_ip=ac_ip,
-                                ac_port=ac_port,
-                            )
+                        alive = fuzzer.is_target_alive(pcap_path=pcap_path)
+
+                        if not alive:
+                            if on_probe_fail == "stop":
+                                # 原有行为：立即停止
+                                raise CrashDetectedError(
+                                    f"Target stopped responding after round {i}",
+                                    round_number=i,
+                                    probe_attempts=3,
+                                    ac_ip=ac_ip,
+                                    ac_port=ac_port,
+                                )
+
+                            # continue 模式
+                            consecutive_probe_failures += 1
+                            if not suspected_recorded:
+                                # 第一次失败：写 suspected_event.json，仅此一次
+                                first_fail_round = i
+                                fuzzer.write_suspected_event(round_number=i, total_status=total_status)
+                                suspected_recorded = True
+                                progress.console.print(
+                                    f"[yellow][!] Probe failed at round {i + 1} "
+                                    f"(consecutive: {consecutive_probe_failures}) — "
+                                    f"suspected crash/DoS, continuing...[/yellow]"
+                                )
+                                logging.warning(
+                                    "Probe failed at round %d (consecutive: %d) — suspected crash/DoS",
+                                    i + 1, consecutive_probe_failures
+                                )
+                            else:
+                                progress.console.print(
+                                    f"[yellow][!] Probe still failing at round {i + 1} "
+                                    f"(consecutive: {consecutive_probe_failures})[/yellow]"
+                                )
+                                logging.warning(
+                                    "Probe still failing at round %d (consecutive: %d)",
+                                    i + 1, consecutive_probe_failures
+                                )
+
+                            if consecutive_probe_failures >= MAX_CONSECUTIVE_FAILURES:
+                                # 连续失败达阈值，视为 crash，停止
+                                raise CrashDetectedError(
+                                    f"Target failed {MAX_CONSECUTIVE_FAILURES} consecutive probes "
+                                    f"(first at round {first_fail_round})",
+                                    round_number=first_fail_round,
+                                    probe_attempts=3,
+                                    ac_ip=ac_ip,
+                                    ac_port=ac_port,
+                                )
+
+                        else:
+                            # 探测成功
+                            if consecutive_probe_failures > 0:
+                                # 之前失败过，现在恢复 → DoS 而非 Crash
+                                progress.console.print(
+                                    f"[green][+] Target recovered at round {i + 1} "
+                                    f"after {consecutive_probe_failures} failed probe(s) — "
+                                    f"likely DoS, not crash[/green]"
+                                )
+                                logging.info(
+                                    "Target recovered at round %d after %d failure(s) — likely DoS",
+                                    i + 1, consecutive_probe_failures
+                                )
+                                fuzzer.update_suspected_event_recovered(round_number=i)
+                            consecutive_probe_failures = 0
 
                     status = fuzzer.fuzzing()
                     for k in ("valid", "timeout", "error", "total"):

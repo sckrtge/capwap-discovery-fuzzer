@@ -384,3 +384,132 @@ capwap_log/20240101_120000/
 3. **`brutal_shuffle_bytes` 强制为 brutal 链末尾**：全字节乱序后任何 brutal 方法均无额外价值。若 shuffle 被选中，前置 brutal 方法仍正常执行，shuffle 强制追加为最后一步。
 
 4. **brutal 下界调整**：75% 概率 brutal 下界为 1（至少一次字节级变异），25% 概率为 0（纯结构化轮次，用于协议合规性测试）。原 `randint(0, 3)` 有 25% 的轮次完全无 brutal 变异，比例偏高。
+
+---
+
+## 实验数据与 OpenCAPWAP 灰盒扩展计划 (2026-04-15)
+
+### 背景
+
+实验目标：
+- **OpenCAPWAP AC**（灰盒）：本地进程，可直接访问 `/proc/<pid>`，已观察到两个可稳定复现的异常（见"已知异常现象"节）
+- **Cisco C9800 WLC**（黑盒）：只能通过 UDP 回包判断存活，`--vendor cisco` 模式不变
+
+### 新增文件输出
+
+```
+capwap_log/20240101_120000/
+├── fuzzer.log
+├── session.json
+├── records.jsonl
+├── summary.json              # 增强：新增 crash_at_round / top_crash_methods / response_time_trend
+├── process_monitor.csv       # 【灰盒独有】进程健康指标时序（每秒采样）
+├── suspected_event.json
+├── crash_report.json
+└── crash_sequence.jsonl      # 【新】崩溃前 50 条记录，自动从 records.jsonl 提取
+```
+
+#### `process_monitor.csv` 字段
+
+| 字段 | 说明 |
+|------|------|
+| `timestamp` | ISO 时间戳 |
+| `round` | 当前 fuzzing 轮次 |
+| `pid_alive` | `True/False`（`kill -0 <pid>`） |
+| `vmrss_kb` | 物理内存（`/proc/<pid>/status` VmRSS） |
+| `vmvirt_kb` | 虚拟内存（VmSize） |
+| `cpu_percent` | CPU 占用（两次读 `/proc/<pid>/stat` 差值） |
+
+#### `summary.json` 增强字段
+
+```json
+{
+  "crash_detected": true,
+  "crash_at_round": 342,
+  "dos_suspected": false,
+  "top_crash_methods": ["fuzz_elem_length_overflow", "brutal_truncate"],
+  "response_time_trend": {
+    "first_50_rounds_mean_ms": 45,
+    "last_50_rounds_mean_ms": 312
+  }
+}
+```
+
+### OpenCAPWAP 灰盒扩展架构
+
+#### 目录结构
+
+```
+vendors/
+├── __init__.py          # "opencapwap" → OpenCAPWAPFuzzer；"opencapwap" 为默认 vendor
+├── base.py
+├── cisco/               # 完全不动
+└── opencapwap/
+    ├── __init__.py
+    └── fuzzer.py        # OpenCAPWAPFuzzer
+```
+
+#### `vendors/__init__.py` 变更
+
+- `get_vendor("opencapwap")` → `OpenCAPWAPFuzzer`
+- `get_vendor("cisco")` → `CiscoCAPWAPDiscoveryFuzzer`
+- `get_vendor("generic")` → `CAPWAPDiscoveryFuzzer`（显式黑盒模式）
+- `--vendor` CLI 默认值从 `None` 改为 `"opencapwap"`
+
+#### `OpenCAPWAPFuzzer` 设计
+
+继承 `CAPWAPDiscoveryFuzzer`，覆盖两处：
+
+**`__init__`**：自动 `pgrep AC` 获取 PID。
+- 找到 → 灰盒模式，启动进程监控侧车线程
+- 未找到 → 警告，降级为纯 UDP 模式（等同基类）
+
+**`is_target_alive()`**：双重检测。
+```
+kill -0 <pid>
+  → 进程消失        → return False（确认 Crash）
+  → 进程存在 + 无UDP回包 → return False（疑似死锁/DoS）
+  → 进程存在 + 有UDP回包 → return True（正常）
+```
+比基类多了"进程活着但不响应"的第三态区分。
+
+**进程监控侧车**：后台 `threading.Thread`，每秒采样 `/proc/<pid>/status` 和 `/proc/<pid>/stat`，写 `process_monitor.csv`。通过共享 `self._current_round`（`fuzzing()` 每轮更新）关联轮次。线程在 `fuzzing()` 结束后自动停止。
+
+### `crash_sequence.jsonl` 提取时机
+
+在 `cli.py` 写 `crash_report.json` 的同一位置，调用 `fuzzer.write_crash_sequence(last_n=50)`，该方法读取 `records.jsonl` 尾部 50 行写入 `crash_sequence.jsonl`。
+
+### `summary.json` 增强时机
+
+`write_summary()` 内部计算，新增：
+- `crash_at_round`：从 `crash_report.json` 读（若存在）
+- `top_crash_methods`：从 `crash_sequence.jsonl` 的 method_chain 统计频次（若存在）
+- `response_time_trend`：比较 records 前 50 条和后 50 条的 elapsed_ms 均值
+
+### 分析脚本
+
+放在 `tools/` 目录，实验结束后独立运行，不影响 fuzzer 主体：
+
+| 脚本 | 功能 | 产出 |
+|------|------|------|
+| `tools/analyze_results.py` | 读单个 log 目录 | 响应类型饼图、方法有效性柱状图、响应时间折线图、内存趋势折线图（灰盒）、错误类型分布条形图 |
+| `tools/compare_sessions.py` | 读多个 log 目录 | 多 session MTTC 对比、响应类型分布对比、不同 vendor 结果对比 |
+
+### 已知异常现象（待源码根因分析）
+
+**现象一：AP 计数异常（DoS）**
+持续发送畸形 Discovery Request 时，`gActiveWTPs` 持续递增至 `gMaxWTPs`，导致合法 AP 无法接入。正常 Discovery 阶段不应触发 WTP 计数。根因疑似在 `ACDiscoveryState.c` 或 `ACProtocol.c` 的计数逻辑位置错误。
+
+**现象二：累积性 Crash**
+持续发送变异报文约 100–500 条后 AC 进程必然崩溃，可稳定复现，单条不可独立触发。疑似内存泄漏或越界写，每条畸形包泄漏少量内存，累积后触发。根因疑似在报文解析或状态管理代码中。
+
+**注**：源码根因分析待实验数据收集完成后进行。
+
+### 实施顺序
+
+1. `vendors/opencapwap/fuzzer.py`（PID 自动检测 + 进程监控侧车 + `is_target_alive()` 覆盖）
+2. `vendors/__init__.py`：新增 opencapwap 映射，默认 vendor 改为 opencapwap
+3. `cli.py`：`--vendor` 默认值改为 `"opencapwap"`
+4. `capwap_discovery_fuzzer.py`：新增 `write_crash_sequence()`，`write_summary()` 增强
+5. `tools/analyze_results.py`
+6. `tools/compare_sessions.py`

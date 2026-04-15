@@ -368,11 +368,53 @@ class CAPWAPDiscoveryFuzzer:
                     logging.error("Failed to replay round %s: %s", record.get("round"), e)
         return results
 
+    # -------------------- 写崩溃前驱序列 --------------------
+    def write_crash_sequence(self, last_n: int = 50):
+        """Extract the last *last_n* records from records.jsonl and write them
+        to crash_sequence.jsonl in the same log directory.
+
+        Called automatically when a crash is confirmed, so the triggering
+        sequence is preserved separately for easy replay and thesis analysis.
+
+        从 records.jsonl 提取最后 last_n 条记录，写入 crash_sequence.jsonl。
+        在确认 Crash 时自动调用，便于单独重放和论文中展示触发序列。
+        """
+        src = self.records_path
+        dst = self.log_dir / "crash_sequence.jsonl"
+        if not src.exists():
+            logging.warning("write_crash_sequence: records.jsonl not found, skipping")
+            return
+
+        lines = []
+        try:
+            with open(src) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+        except OSError as e:
+            logging.warning("write_crash_sequence: failed to read records: %s", e)
+            return
+
+        tail = lines[-last_n:]
+        with open(dst, "w") as f:
+            for line in tail:
+                f.write(line + "\n")
+        logging.info(
+            "crash_sequence.jsonl written: %d records (last %d of %d total)",
+            len(tail), last_n, len(lines)
+        )
+
     # -------------------- 写汇总 --------------------
-    def write_summary(self, total_status: dict):
-        """读取 records.jsonl，计算方法有效性和响应时间统计，写入 summary.json。"""
+    def write_summary(self, total_status: dict, crash_at_round: int | None = None):
+        """读取 records.jsonl，计算方法有效性和响应时间统计，写入 summary.json。
+
+        crash_at_round: 若发生了 Crash，传入崩溃轮次，用于统计 top_crash_methods
+                        和 response_time_trend。
+        """
         method_stats: dict[str, dict] = {}
         elapsed_list: list[int] = []
+        all_records: list[dict] = []
 
         try:
             with open(self.records_path) as f:
@@ -381,6 +423,7 @@ class CAPWAPDiscoveryFuzzer:
                     if not line:
                         continue
                     r = json.loads(line)
+                    all_records.append(r)
                     if r.get("elapsed_ms") is not None:
                         elapsed_list.append(r["elapsed_ms"])
                     rt = r.get("response_type", "error")
@@ -393,6 +436,8 @@ class CAPWAPDiscoveryFuzzer:
 
         summary = dict(total_status)
         summary["method_effectiveness"] = method_stats
+
+        # Response time stats
         if elapsed_list:
             sorted_e = sorted(elapsed_list)
             p95_idx = int(len(sorted_e) * 0.95)
@@ -402,6 +447,49 @@ class CAPWAPDiscoveryFuzzer:
                 "max_ms": sorted_e[-1],
                 "p95_ms": sorted_e[min(p95_idx, len(sorted_e) - 1)],
             }
+
+        # Crash-specific enhancements
+        crash_seq_path = self.log_dir / "crash_sequence.jsonl"
+        crash_detected = crash_at_round is not None or crash_seq_path.exists()
+        summary["crash_detected"] = crash_detected
+        if crash_at_round is not None:
+            summary["crash_at_round"] = crash_at_round
+
+        if crash_detected and crash_seq_path.exists():
+            # top_crash_methods: most frequent methods in the crash-preceding sequence
+            # 崩溃前驱序列中出现频次最高的变异方法
+            method_counts: dict[str, int] = {}
+            try:
+                with open(crash_seq_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        r = json.loads(line)
+                        for m in r.get("method_chain", []):
+                            method_counts[m] = method_counts.get(m, 0) + 1
+            except OSError:
+                pass
+            top = sorted(method_counts.items(), key=lambda x: x[1], reverse=True)
+            summary["top_crash_methods"] = [m for m, _ in top[:5]]
+
+        # Response time trend: compare first 50 vs last 50 rounds
+        # 响应时间趋势：对比前 50 轮与后 50 轮的平均响应时间
+        if len(all_records) >= 10:
+            def _mean_elapsed(records):
+                vals = [r["elapsed_ms"] for r in records if r.get("elapsed_ms") is not None]
+                return int(sum(vals) / len(vals)) if vals else None
+
+            head50 = all_records[:50]
+            tail50 = all_records[-50:]
+            head_mean = _mean_elapsed(head50)
+            tail_mean = _mean_elapsed(tail50)
+            if head_mean is not None and tail_mean is not None:
+                summary["response_time_trend"] = {
+                    "first_50_rounds_mean_ms": head_mean,
+                    "last_50_rounds_mean_ms": tail_mean,
+                    "degradation_ratio": round(tail_mean / head_mean, 2) if head_mean > 0 else None,
+                }
 
         with open(self.log_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)

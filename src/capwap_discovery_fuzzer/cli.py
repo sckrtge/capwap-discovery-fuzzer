@@ -12,6 +12,7 @@ from datetime import datetime
 from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from .errors import CrashDetectedError
 from .vendors import get_vendor, DEFAULT_VENDOR
+from .vendors.opencapwap.fuzzer import OpenCAPWAPFuzzer
 
 app = typer.Typer()
 console = Console()
@@ -200,6 +201,11 @@ def fuzz(
 
     # -------------------- Fuzzing 模式 --------------------
     else:
+        # 启动进程监控侧车（仅 OpenCAPWAPFuzzer 有此方法）
+        # Start process monitor sidecar (only available on OpenCAPWAPFuzzer)
+        if isinstance(fuzzer, OpenCAPWAPFuzzer):
+            fuzzer.start_process_monitor()
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -316,6 +322,10 @@ def fuzz(
                         progress.advance(task, 1)
                     time.sleep(sleep_per_round)
 
+        # -------------------- 停止进程监控 --------------------
+        if isinstance(fuzzer, OpenCAPWAPFuzzer):
+            fuzzer.stop_process_monitor()
+
         # -------------------- Crash 报告 --------------------
         if crash_error is not None:
             crash_report = {
@@ -330,7 +340,9 @@ def fuzz(
             with open(report_path, "w") as f:
                 json.dump(crash_report, f, indent=2, default=str)
             console.print(f"[bold red][!] Crash report saved to {report_path}[/bold red]")
-            fuzzer.write_summary(total_status)
+            fuzzer.write_crash_sequence(last_n=50)
+            console.print(f"[bold red][!] Crash sequence saved to {fuzzer.log_dir / 'crash_sequence.jsonl'}[/bold red]")
+            fuzzer.write_summary(total_status, crash_at_round=crash_error.round_number)
             sys.exit(2)
 
     # -------------------- 汇总统计 --------------------

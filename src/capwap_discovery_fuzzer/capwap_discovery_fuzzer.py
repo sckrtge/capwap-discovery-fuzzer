@@ -167,8 +167,22 @@ class CAPWAPDiscoveryFuzzer:
                 return bytes(pkt["UDP"].payload)
         raise ValueError("No CAPWAP Discovery Request found in pcap!")
 
+    # -------------------- 进程存活（供子类覆盖） --------------------
+    def is_process_alive(self) -> bool | None:
+        """Return True/False if process liveness can be determined, None if unknown (black-box).
+
+        Base implementation always returns None — no process to inspect in black-box mode.
+        Subclasses with process access (e.g. OpenCAPWAPFuzzer) override this to return
+        a definitive True/False via kill -0.
+
+        基类始终返回 None（黑盒模式，无法检查进程）。
+        具有进程访问权限的子类（如 OpenCAPWAPFuzzer）覆盖此方法，通过 kill -0 返回确定值。
+        """
+        return None
+
     # -------------------- Fuzzing --------------------
-    def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3, max_brutal_methods: int = 3):
+    def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3,
+                max_brutal_methods: int = 3, round_number: int | None = None):
         status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
 
         if pcap_path:
@@ -282,8 +296,9 @@ class CAPWAPDiscoveryFuzzer:
                 pkt = method(pkt)
                 method_chain.append(getattr(method, "__name__", str(method)))
 
-            request_info = {"iteration": i + 1, "method_chain": method_chain}
-            logging.info("Composite Fuzz iteration %d: method chain: %s", i + 1, method_chain)
+            iteration = round_number if round_number is not None else (i + 1)
+            request_info = {"iteration": iteration, "method_chain": method_chain}
+            logging.info("Composite Fuzz iteration %d: method chain: %s", iteration, method_chain)
 
             try:
                 t0 = time.monotonic()

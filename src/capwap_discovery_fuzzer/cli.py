@@ -246,60 +246,91 @@ def fuzz(
                                     ac_port=ac_port,
                                 )
 
-                            # continue 模式
-                            consecutive_probe_failures += 1
-                            if not suspected_recorded:
-                                # 第一次失败：写 suspected_event.json，仅此一次
-                                first_fail_round = i
-                                fuzzer.write_suspected_event(round_number=i, total_status=total_status)
-                                suspected_recorded = True
-                                progress.console.print(
-                                    f"[yellow][!] Probe failed at round {i + 1} "
-                                    f"(consecutive: {consecutive_probe_failures}) — "
-                                    f"suspected crash/DoS, continuing...[/yellow]"
-                                )
-                                logging.warning(
-                                    "Probe failed at round %d (consecutive: %d) — suspected crash/DoS",
-                                    i + 1, consecutive_probe_failures
-                                )
-                            else:
-                                progress.console.print(
-                                    f"[yellow][!] Probe still failing at round {i + 1} "
-                                    f"(consecutive: {consecutive_probe_failures})[/yellow]"
-                                )
-                                logging.warning(
-                                    "Probe still failing at round %d (consecutive: %d)",
-                                    i + 1, consecutive_probe_failures
-                                )
+                            # continue 模式：区分 DoS（进程存活）和 Crash（进程死亡）
+                            proc_alive = fuzzer.is_process_alive()
 
-                            if consecutive_probe_failures >= MAX_CONSECUTIVE_FAILURES:
-                                # 连续失败达阈值，视为 crash，停止
+                            if proc_alive is False:
+                                # 进程已死亡 → 确认 Crash，立即停止
                                 raise CrashDetectedError(
-                                    f"Target failed {MAX_CONSECUTIVE_FAILURES} consecutive probes "
-                                    f"(first at round {first_fail_round})",
-                                    round_number=first_fail_round,
+                                    f"AC process is gone at round {i + 1} (confirmed crash)",
+                                    round_number=i,
                                     probe_attempts=3,
                                     ac_ip=ac_ip,
                                     ac_port=ac_port,
                                 )
+                            elif proc_alive is True:
+                                # 进程存活但无 UDP 回包 → DoS / 死锁，记录并继续
+                                if not suspected_recorded:
+                                    first_fail_round = i
+                                    fuzzer.write_suspected_event(round_number=i, total_status=total_status)
+                                    suspected_recorded = True
+                                    progress.console.print(
+                                        f"[yellow][!] Probe failed at round {i + 1} — "
+                                        f"process alive, no UDP reply → DoS suspected, continuing...[/yellow]"
+                                    )
+                                    logging.warning(
+                                        "Probe failed at round %d — process alive, no UDP → DoS suspected",
+                                        i + 1
+                                    )
+                                else:
+                                    progress.console.print(
+                                        f"[yellow][!] Still no UDP reply at round {i + 1} "
+                                        f"(process alive — DoS ongoing)[/yellow]"
+                                    )
+                                    logging.warning(
+                                        "No UDP reply at round %d (process alive — DoS ongoing)", i + 1
+                                    )
+                                # DoS 不计入 consecutive_probe_failures，继续 fuzzing
+                            else:
+                                # proc_alive is None：黑盒模式，无法判断进程状态，沿用旧逻辑
+                                consecutive_probe_failures += 1
+                                if not suspected_recorded:
+                                    first_fail_round = i
+                                    fuzzer.write_suspected_event(round_number=i, total_status=total_status)
+                                    suspected_recorded = True
+                                    progress.console.print(
+                                        f"[yellow][!] Probe failed at round {i + 1} "
+                                        f"(consecutive: {consecutive_probe_failures}) — "
+                                        f"suspected crash/DoS, continuing...[/yellow]"
+                                    )
+                                    logging.warning(
+                                        "Probe failed at round %d (consecutive: %d) — suspected crash/DoS",
+                                        i + 1, consecutive_probe_failures
+                                    )
+                                else:
+                                    progress.console.print(
+                                        f"[yellow][!] Probe still failing at round {i + 1} "
+                                        f"(consecutive: {consecutive_probe_failures})[/yellow]"
+                                    )
+                                    logging.warning(
+                                        "Probe still failing at round %d (consecutive: %d)",
+                                        i + 1, consecutive_probe_failures
+                                    )
+
+                                if consecutive_probe_failures >= MAX_CONSECUTIVE_FAILURES:
+                                    raise CrashDetectedError(
+                                        f"Target failed {MAX_CONSECUTIVE_FAILURES} consecutive probes "
+                                        f"(first at round {first_fail_round})",
+                                        round_number=first_fail_round,
+                                        probe_attempts=3,
+                                        ac_ip=ac_ip,
+                                        ac_port=ac_port,
+                                    )
 
                         else:
                             # 探测成功
-                            if consecutive_probe_failures > 0:
-                                # 之前失败过，现在恢复 → DoS 而非 Crash
+                            if consecutive_probe_failures > 0 or suspected_recorded:
                                 progress.console.print(
-                                    f"[green][+] Target recovered at round {i + 1} "
-                                    f"after {consecutive_probe_failures} failed probe(s) — "
-                                    f"likely DoS, not crash[/green]"
+                                    f"[green][+] Target recovered at round {i + 1} — likely DoS, not crash[/green]"
                                 )
                                 logging.info(
-                                    "Target recovered at round %d after %d failure(s) — likely DoS",
-                                    i + 1, consecutive_probe_failures
+                                    "Target recovered at round %d — likely DoS", i + 1
                                 )
-                                fuzzer.update_suspected_event_recovered(round_number=i)
+                                if suspected_recorded:
+                                    fuzzer.update_suspected_event_recovered(round_number=i)
                             consecutive_probe_failures = 0
 
-                    status = fuzzer.fuzzing()
+                    status = fuzzer.fuzzing(round_number=i + 1)
                     for k in ("valid", "timeout", "error", "total"):
                         total_status[k] += status.get(k, 0)
                     for etype, count in status.get("error_types", {}).items():

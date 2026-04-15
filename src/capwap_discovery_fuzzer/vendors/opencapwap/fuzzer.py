@@ -330,9 +330,26 @@ class OpenCAPWAPFuzzer(CAPWAPDiscoveryFuzzer):
     # Fuzzing — wrap base method to maintain round counter and monitor
     # ------------------------------------------------------------------
 
+    def is_process_alive(self) -> bool | None:
+        """Check AC process liveness via kill -0.
+
+        Returns True if the process exists, False if it has died, None if PID is unknown.
+        Used by cli.py to distinguish DoS (process alive, no UDP) from Crash (process dead).
+
+        通过 kill -0 检查 AC 进程是否存活。
+        返回 True 表示进程存在，False 表示进程已死亡，None 表示 PID 未知。
+        供 cli.py 区分 DoS（进程存活但无 UDP 回包）与 Crash（进程已死亡）。
+        """
+        if self._ac_pid is None:
+            self._ac_pid = _find_ac_pid(self.AC_PROC_NAME)
+        if self._ac_pid is not None:
+            return _pid_alive(self._ac_pid)
+        return None
+
     def fuzzing(self, pcap_path: str | None = None,
                 max_safe_methods: int = 3,
-                max_brutal_methods: int = 3) -> dict:
+                max_brutal_methods: int = 3,
+                round_number: int | None = None) -> dict:
         """Run one fuzzing round, keeping the round counter up to date.
 
         The process monitor sidecar (if running) reads self._current_round[0]
@@ -347,6 +364,7 @@ class OpenCAPWAPFuzzer(CAPWAPDiscoveryFuzzer):
             pcap_path=pcap_path,
             max_safe_methods=max_safe_methods,
             max_brutal_methods=max_brutal_methods,
+            round_number=self._current_round[0],
         )
 
     # ------------------------------------------------------------------

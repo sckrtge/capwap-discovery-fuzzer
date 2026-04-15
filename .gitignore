@@ -18,6 +18,9 @@ venv/
 # OS
 .DS_Store
 
+# Charts / analysis output
+charts/
+
 # Logs / fuzz output
 *.log
 capwap_log/

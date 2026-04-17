@@ -218,65 +218,202 @@ AC 能正常处理并回复 Discovery Response 的方法（valid 响应）：
 
 ## 6. 根因分析
 
-### 6.1 现象一根因：WTP 计数绕过（DoS）
+### 6.1 现象一根因：合法性检查顺序颠倒导致 WTP 槽位耗尽（DoS）
 
-**相关源文件**：`ACDiscoveryState.c`、`CWAC.h`
+**根因文件**：`ACMainLoop.c`，Discovery 报文处理分支（约第 360~500 行）
 
-**分析**：`gActiveWTPs` 在 Discovery 阶段被无条件递增，没有对请求方 IP/MAC 唯一性的检查。单一 fuzzer 进程（固定源 IP）反复发送畸形包，每次均触发 `New Session` 并占用一个 WTP 槽位。当 `gActiveWTPs >= gMaxWTPs`（默认 15），后续所有合法 AP 请求被拒绝，AC 输出 "Too many WTPs"。约 10~20 轮后 AC 超时清理旧 WTP 条目，DoS 短暂恢复，随后再次触发。
+**核心逻辑（`ACMainLoop.c`）**：
 
-**建议修复**：在 `gActiveWTPs++` 之前验证请求源 IP/MAC 唯一性，并对单一源 IP 的 Discovery 请求做速率限制。
+```c
+// 1. 先检查槽位是否满
+if (gActiveWTPs >= gMaxWTPs) {
+    CWLog("Too many WTPs");
+    return;                          // 满了才拒绝
+}
 
-### 6.2 现象二根因：内存泄漏 + 非法内存访问（Crash）
+// 2. 尝试解析报文，判断是否为合法 Discovery Request
+if (CWErr(CWParseDiscoveryRequestMessage(...))) {
+    // 合法 Discovery Request → 发送 Discovery Response，不创建 Session
+    CWAssembleDiscoveryResponse(...);
+    ...
+} else {
+    // 解析失败（非 Discovery Request，如 DTLS ClientHello 或畸形包）
+    // → 直接分配 WTP 槽位，创建 CWManageWTP 线程！
+    gWTPs[i].isNotFree = CW_TRUE;
+    CWCreateThread(&gWTPs[i].thread, CWManageWTP, argPtr);
+    // CWManageWTP 线程启动后：gActiveWTPs++
+}
+```
 
-**相关源文件**：`ACProtocol.c`、`CWProtocol.c`
+**DoS 触发逻辑**：
 
-**累积性崩溃（会话1）**：VmRSS 从 2920 KB 线性增长至 4108 KB（+1188 KB），增长速率约 13 KB/轮。报文解析路径中存在 `malloc` 但在异常返回路径（如 "Malformed Transport Header"、"Message Element Malformed"）上没有对应 `free`，造成每次解析畸形包均泄漏内存，累积后触发崩溃。
+1. 畸形包（无法被 `CWParseDiscoveryRequestMessage` 解析）进入 `else` 分支
+2. AC 将其视为潜在的 DTLS ClientHello，为其分配一个 WTP 槽位并创建线程
+3. 新线程 `CWManageWTP` 启动，`gActiveWTPs++`（`ACMainLoop.c:645`）
+4. 线程等待 DTLS 握手，WTP 槽位被长期占用
+5. 每条畸形包重复上述过程，直至 `gActiveWTPs >= gMaxWTPs`（默认 15）
+6. 此后合法 AP 的 Discovery Request 在第 373 行被拒绝，输出 "Too many WTPs"
 
-**直接触发崩溃（会话2）**：仅 10 轮即崩溃，内存增量 104 KB，主要涉及 `fuzz_elem_insert_unknown`、`fuzz_ctrl_seqnum` 等方法。推测特定方法组合构造了一个能导致缓冲区越界访问的畸形包（如元素长度字段过大，导致 AC 按错误长度读取内存）。
+**根本问题**：AC 将"无法解析为 Discovery Request 的 UDP 包"统一解释为"可能是 DTLS 握手"，并为其分配资源。**合法性验证发生在资源分配之后**，而不是之前。任何来自任意源 IP 的畸形 UDP 包都能消耗一个 WTP 槽位，无需认证、无需速率限制。
 
-**响应异常（新发现）**：`unpack requires a buffer` 错误表明 AC 在部分情况下会发出结构损坏的回包，说明 AC 侧的序列化代码也存在问题。
+**注**：`ACDiscoveryState.c:159` 报告的 "Message is not Discovery Request as Expected" 和 `ACDiscoveryState.c:222` 报告的 "Unrecognized Message Element" 均是 `CWParseDiscoveryRequestMessage` 内部的错误返回，触发 `else` 分支创建 Session——这是导致 DoS 的直接入口，而非独立漏洞。
+
+**建议修复**：在 `else` 分支分配 WTP 槽位之前，增加源 IP 频率限制或对"合法 DTLS ClientHello"做基本格式校验（如检查 DTLS Record Header 的 Content-Type 字段），拒绝明显不符合 DTLS 格式的包。
+
+### 6.2 现象二根因：NULL SSL Session 指针解引用（Crash）
+
+**定位方式**：GDB 运行 AC，重放 `crash_sequence.jsonl`，捕获 SIGSEGV 信号时打印 backtrace。
+
+**GDB backtrace（精确崩溃栈）**：
+```
+Thread 9 "AC" received signal SIGSEGV, Segmentation fault.
+#0  0x5555555cca04 in SSL_read ()          ← 崩溃点：rdi=0x0
+#1  0x5555555b0a39 in CWSecurityReceive ()  ← CWSecurity.c:302
+#2  0x555555595b93 in CWManageWTP ()        ← ACMainLoop.c:771
+#3  start_thread / clone3                   ← 每 WTP 独立线程
+```
+
+**直接原因**：`SSL_read` 以 `rdi=0x0`（NULL 指针）被调用，执行 `cmp QWORD PTR [rdi+0x30], 0x0` 时触发 SIGSEGV。
+
+**根因触发链**（`ACMainLoop.c`）：
+
+```
+brutal_shuffle_bytes / brutal_reverse_segment 等字节级变异
+  → 报文首字节低4位偶然变为 0x01（= CW_PACKET_CRYPT）
+  → pBuffer[0] & 0x0f == CW_PACKET_CRYPT → bCrypt = TRUE  // ACMainLoop.c:764
+  → CWSecurityReceive(gWTPs[i].session, buf, size, &n)      // ACMainLoop.c:771
+  → SSL_read(session=NULL, buf, len)                         // CWSecurity.c:302
+  → SIGSEGV
+```
+
+**为何 `session` 为 NULL**：每个 `New Session` 线程在 `CWManageWTP` 中需完成 DTLS 握手（`CWSecurityInitSessionServer`）后才设置 `gWTPs[i].session`。畸形 UDP 明文包无法触发 DTLS 握手，`session` 在握手成功前始终为 NULL（或上一线程 `_CWCloseThread` 清零后的 NULL）。当报文首字节低4位恰好为 `0x01` 时，AC 误判为 DTLS 加密包，绕过了握手等待直接调用 `SSL_read(NULL)`。
+
+**实测验证**：会话2的 crash_sequence 中，round=6/8/9 的首字节 `b0=0x01`，触发 `bCrypt=TRUE`；round=6 使用 `brutal_reverse_segment`，round=8/9 使用 `brutal_shuffle_bytes`，两个方法均会随机修改首字节。
+
+**缺失的防护**（`CWSecurity.c:302`）：
+```c
+// 现有代码（无 NULL 检查）：
+CWSecurityManageSSLError((*readBytesPtr=SSL_read(session, buf, len)), session, ;);
+
+// 正确做法应先检查：
+if (session == NULL) return CWErrorRaise(CW_ERROR_WRONG_ARG, "NULL SSL session");
+```
 
 ### 6.3 小结
 
-| 漏洞编号 | 类型 | 触发难度 | 影响 |
-|---------|------|---------|------|
-| VULN-01 | DoS（WTP 计数绕过） | 极易（通用畸形包即触发） | 合法 AP 无法接入 |
-| VULN-02 | 累积性内存泄漏 → Crash | 中（需约 50~100 轮） | AC 进程崩溃，服务中断 |
-| VULN-03 | 单包/少包直接 Crash | 较易（10轮内） | AC 进程崩溃，服务中断 |
+| 漏洞编号 | 类型 | 触发难度 | 根因文件 | 影响 |
+|---------|------|---------|---------|------|
+| VULN-01 | DoS（WTP 计数绕过） | 极易（通用畸形包即触发） | `ACDiscoveryState.c` | 合法 AP 无法接入 |
+| VULN-02 | NULL Session 解引用 → Crash | 中（需畸形包累积触发 `b0&0xf=1`） | `ACMainLoop.c:764`、`CWSecurity.c:302` | AC 进程崩溃，服务中断 |
+| VULN-03 | 同 VULN-02，高效触发路径 | 较易（10轮内） | 同上 | AC 进程崩溃，服务中断 |
 
 ---
 
-## 7. 崩溃复现步骤
+## 7. 漏洞复现实验（2026-04-17）
 
-以会话1崩溃序列为例：
+### 7.1 复现方法
 
+重放对应 `crash_sequence.jsonl`，通过 `--vendor opencapwap` 灰盒模式自动检测 AC 进程存活状态。
+
+**通用步骤：**
 ```bash
-# 1. 重启 AC
+# 重启 AC（每次复现前必须保证状态干净）
 cd /home/gxm/projects/openCAPWAP-ubuntu2404
 echo "123123" | sudo -S killall -9 AC 2>/dev/null || true
 sleep 1
 echo "123123" | sudo -S ./AC . &>/tmp/opencapwap_ac.log &
 sleep 3
 
-# 2. 用崩溃前驱序列重放
+# 重放崩溃序列
 cd /home/gxm/projects/fuzzing/capwap-discovery-fuzzer
 echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
-    --ac-ip 192.168.33.128 \
+    --ac-ip 192.168.33.128 --timeout 3 --sleep 0.3 \
     --vendor opencapwap \
-    --replay-jsonl capwap_log/20260415_165736/crash_sequence.jsonl
+    --replay-jsonl <crash_sequence.jsonl>
 ```
+
+### 7.2 VULN-01 复现（DoS — WTP 计数耗尽）✅
+
+**复现日期**：2026-04-17  
+**使用序列**：会话1原始 records.jsonl 前 30 条（`--sleep 0.5`）
+
+**结果**：
+- AC 进程全程存活（`pgrep -x AC` 持续返回 PID）
+- AC 日志出现 **10 条 "Too many WTPs"**，WTP 槽位（max=15）被耗尽
+- 同期 valid 记录 1 条（round=8，合法包仍能响应，说明 AC 未崩溃）
+
+**AC 日志关键片段**：
+```
+Error: Invalid Format. Message is not Discovery Request as Expected .
+(occurred at line 159 in file ACDiscoveryState.c, ...)
+New Session
+Too many WTPs
+Too many WTPs
+Too many WTPs
+Too many WTPs
+Too many WTPs
+```
+
+**结论**：✅ **100% 复现**。每条畸形包均触发 `New Session` 并占用一个 WTP 槽位，无需特殊方法组合，通用畸形包即可耗尽 15 个槽位。关键源码位置：`ACDiscoveryState.c:159`。
+
+---
+
+### 7.3 VULN-02 复现（累积性 Crash）✅
+
+**复现日期**：2026-04-17  
+**使用序列**：`capwap_log/20260415_165736/crash_sequence.jsonl`（50 条，`--sleep 0.3`）
+
+**结果**：
+- 50 条全部 timeout（AC 在发送过程中死亡）
+- 复现结束后 `pgrep -x AC` → **AC 进程死亡**
+- AC 日志截断于 `CWProtocol.c:996` 处的 `Malformed Transport Header` 错误后的 `New Session`
+
+**AC 日志末尾**：
+```
+Error: Invalid Format. Malformed Transport Header .
+(occurred at line 996 in file CWProtocol.c, catched at line 380 in file ACMainLoop.c).
+New Session
+[日志截断，进程死亡]
+```
+
+**结论**：✅ **复现成功**。崩溃触发点为 `CWProtocol.c:996` 处理 Malformed Transport Header 后的 New Session 状态，进程静默死亡（无 Segfault 输出，推测 SIGBUS/SIGSEGV 但 stderr 已重定向）。
+
+---
+
+### 7.4 VULN-03 复现（极早直接 Crash）✅
+
+**复现日期**：2026-04-17  
+**使用序列**：`capwap_log/20260415_170825/crash_sequence.jsonl`（10 条，`--sleep 0.3`）
+
+**结果**：
+- 仅 10 条包，AC 进程死亡
+- 日志同样截断于 `CWProtocol.c:996` + `New Session`
+
+**结论**：✅ **复现成功**。与 VULN-02 崩溃路径相同，但仅需 10 条包即触发，说明会话2中存在触发效率更高的特定方法组合。会话2的 top 方法为 `fuzz_ctrl_seqnum`、`fuzz_elem_insert_unknown`、`brutal_insert_random_bytes`，可能其中某个构造了能直接触发越界访问的单包。
+
+---
+
+### 7.5 复现结果汇总
+
+| 漏洞 | 复现结果 | 判断依据 | 最少触发包数 |
+|------|---------|---------|------------|
+| VULN-01（DoS） | ✅ 成功 | AC 存活 + "Too many WTPs" × 10 | ~15 条（耗尽槽位） |
+| VULN-02（累积 Crash） | ✅ 成功 | AC 死亡 + 日志截断 | 50 条（崩溃序列） |
+| VULN-03（极早 Crash） | ✅ 成功 | AC 死亡 + 日志截断 | **10 条** |
+
+**崩溃共同特征**：所有 Crash 均终止于 `CWProtocol.c:996`（`Malformed Transport Header`）→ `ACMainLoop.c:380` 捕获 → `New Session` 后进程静默死亡。这是源码根因分析的核心入口。
 
 ---
 
 ## 8. 结论
 
-本次实验成功复现并量化了 OpenCAPWAP AC 的两个已知安全漏洞，并发现了一个新问题：
+本次实验成功复现并量化了 OpenCAPWAP AC 的三个安全漏洞：
 
-1. **VULN-01（DoS）**：100% 复现率（3/3次实验均触发），通用畸形 Discovery Request 即可耗尽 WTP 槽位。
-2. **VULN-02（累积性 Crash）**：在会话1（90轮）中稳定复现，进程段错误。
-3. **VULN-03（极早 Crash）**：会话2 仅 10 轮即触发段错误，存在低轮次直接崩溃路径。
+1. **VULN-01（DoS）**：100% 复现（3/3次实验触发 + 独立复现验证），通用畸形 Discovery Request 即可耗尽 WTP 槽位，根因位于 `ACDiscoveryState.c:159`。
+2. **VULN-02（累积性 Crash）**：50 条前驱序列重放后稳定复现，进程静默死亡，崩溃路径经过 `CWProtocol.c:996`。
+3. **VULN-03（极早 Crash）**：仅 10 条包即触发崩溃，存在高效触发路径，同经 `CWProtocol.c:996`。
 
-OpenCAPWAP AC 在面对畸形 CAPWAP Discovery Request 时存在严重的健壮性问题，不具备生产级可靠性。
+OpenCAPWAP AC 在面对畸形 CAPWAP Discovery Request 时存在严重的健壮性问题，不具备生产级可靠性。三个漏洞均已通过重放实验独立验证可重复性。
 
 ---
 

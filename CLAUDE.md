@@ -657,13 +657,11 @@ echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_
 
 ---
 
-## 实验进展（2026-04-15）
+## 实验进展（2026-04-15 更新）
 
-### 已完成
+### OpenCAPWAP 灰盒实验（已全部完成，2026-04-15）
 
-**阶段一～三（数据收集 + 图表）：已全部完成。**
-
-3 次独立 OpenCAPWAP 灰盒实验已跑完，结果写入 `experiments/opencapwap/experiment_report.md`。
+3 次独立实验已跑完，结果写入 `experiments/opencapwap/experiment_report.md`。
 
 | 会话 ID | 轮次 | 崩溃轮次 | DoS 事件 | 内存增长 |
 |---------|------|---------|---------|---------|
@@ -684,48 +682,63 @@ echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_
 - `continue` 模式无法区分 DoS 和 Crash 的逻辑（新增 `is_process_alive()`）
 - `_raw_to_pkt` 暴力变异后不再重新解析，改为 `Raw(bytes(raw))` 避免 struct.unpack 异常
 
-### 下一步：漏洞复现（阶段四）
+---
 
-目标：对三个漏洞分别设计定向复现实验，验证可重复触发，并为论文提供复现章节的证据。
+## Cisco C9800 黑盒实验（2026-04-17）
 
-#### VULN-01 复现（DoS）
+### 实验概述
 
-通过 `replay-jsonl` 重放会话1的前 30 条记录（DoS 触发前驱），观察 AC 日志中 "Too many WTPs" 是否重现：
+目标：Cisco Catalyst 9800 WLC（`192.168.10.201:5246`），接口 `ens37`，`--vendor cisco` 黑盒模式。
+完整报告：`experiments/cisco/experiment_report.md`
 
-```bash
-cd /home/gxm/projects/openCAPWAP-ubuntu2404
-echo "123123" | sudo -S killall -9 AC 2>/dev/null || true; sleep 1
-echo "123123" | sudo -S ./AC . &>/tmp/opencapwap_ac.log &
-sleep 3
-
-cd /home/gxm/projects/fuzzing/capwap-discovery-fuzzer
-echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
-    --ac-ip 192.168.33.128 --vendor opencapwap \
-    --replay-jsonl capwap_log/20260415_165736/crash_sequence.jsonl
-```
-
-判断标准：`grep "Too many WTPs" /tmp/opencapwap_ac.log`
-
-#### VULN-02/03 复现（Crash）
-
-重放对应 crash_sequence.jsonl，观察 AC 进程是否再次 Segfault：
+### 测试参数（标准配置）
 
 ```bash
-# VULN-02（会话1）
-echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
-    --ac-ip 192.168.33.128 --vendor opencapwap \
-    --replay-jsonl capwap_log/20260415_165736/crash_sequence.jsonl
-
-# VULN-03（会话2）
-echo "123123" | sudo -S /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
-    --ac-ip 192.168.33.128 --vendor opencapwap \
-    --replay-jsonl capwap_log/20260415_170825/crash_sequence.jsonl
+sudo /home/gxm/projects/.venv/bin/python -m capwap_discovery_fuzzer \
+    --ac-ip 192.168.10.201 \
+    --rounds 200 \
+    --timeout 2 \
+    --sleep 0.1 \
+    --iface ens37 \
+    --probe-interval 10 \
+    --on-probe-fail stop \
+    --vendor cisco
 ```
 
-判断标准：shell 报告 `段错误`，`process_monitor.csv` 中 `pid_alive` 变为 False。
+### 实验结果（3次 × 200轮）
 
-#### 注意事项
+| 会话 ID | valid | timeout | error | 崩溃 | mean_ms |
+|---------|-------|---------|-------|------|---------|
+| 20260417_143956 | 13 (6.5%) | 187 | 0 | 否 | 1872 |
+| 20260417_144641 | 14 (7.0%) | 186 | 0 | 否 | 1862 |
+| 20260417_145321 | 15 (7.5%) | 185 | 0 | 否 | 1851 |
 
-- 复现前必须重启 AC（`killall -9 AC`）
-- 复现结果记录到 `experiments/opencapwap/experiment_report.md` 第7节
-- 复现成功后进入**阶段五（源码根因分析）**
+**核心结论**：C9800 全程稳定，无崩溃、无 DoS、无性能退化。商用设备对畸形包采取静默丢弃策略，valid 率约 7%（OpenCAPWAP < 1%）。
+
+### C9800 有效报文接受条件
+
+通过对 42 条 valid 报文的字段级分析，C9800 的核心过滤条件为：
+1. **MsgType == 19**（Cisco 私有 Discovery，全部 42 条满足）
+2. **MsgElemsLen == 231**（全部 42 条相同，是最重要的硬性过滤条件）
+
+满足以上两条后，C9800 对元素内容及多数 Header 语义字段较为宽松。
+
+### RFC 5415 合规性偏差（低危）
+
+| 编号 | 字段 | RFC 要求 | C9800 实际行为 |
+|------|------|---------|--------------|
+| ISSUE-01 | CAPWAP Hdr T 位 | Control 报文须 T=0 | T=1 仍响应（2条复现） |
+| ISSUE-02 | CAPWAP Hdr F/L 位 | 非分片包须 F=L=0 | F=1 单包仍响应（5条复现） |
+| ISSUE-03 | CAPWAP Hdr WBID | 只定义 WBID=1(802.11) | WBID=12/31 仍响应（2条复现） |
+
+三项均为低危问题，不构成可利用漏洞，但反映 C9800 在 CAPWAP Header 语义字段校验上存在规范偏差。
+
+### 与 OpenCAPWAP 对比
+
+| 维度 | OpenCAPWAP（灰盒） | Cisco C9800（黑盒） |
+|------|-------------------|-------------------|
+| valid 率 | < 1% | ~7% |
+| 崩溃 | 2/3次实验 | 0/3次 |
+| DoS 现象 | 2/3次触发 | 未检测到 |
+| 响应时间退化 | 轻微（1.04x） | 无（≤1.09x） |
+| 输入验证 | 严格但脆弱 | 宽松但稳定 |

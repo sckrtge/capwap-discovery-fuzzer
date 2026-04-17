@@ -285,4 +285,4 @@ coverage run -m pytest && coverage html      # coverage report
 
 ## License / 许可证
 
-MIT
+GPL-2.0

@@ -1,0 +1,17 @@
+{
+  "type": "dos_suspected",
+  "first_fail_round": 30,
+  "timestamp": "2026-04-15T17:11:04.305032",
+  "probe_attempts": 3,
+  "ac_ip": "192.168.33.128",
+  "ac_port": 5246,
+  "total_status_at_fail": {
+    "total": 30,
+    "valid": 2,
+    "timeout": 28,
+    "error": 0,
+    "error_types": {}
+  },
+  "recovered_at_round": 180,
+  "recovery_timestamp": "2026-04-15T17:21:07.027128"
+}

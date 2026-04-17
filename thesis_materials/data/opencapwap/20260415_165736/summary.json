@@ -1,0 +1,209 @@
+{
+  "total": 89,
+  "valid": 2,
+  "timeout": 87,
+  "error": 0,
+  "error_types": {},
+  "method_effectiveness": {
+    "fuzz_capwap_wbid": {
+      "uses": 10,
+      "valid": 0,
+      "timeout": 10,
+      "error": 0
+    },
+    "fuzz_elem_length": {
+      "uses": 8,
+      "valid": 1,
+      "timeout": 7,
+      "error": 0
+    },
+    "brutal_fill_segment": {
+      "uses": 13,
+      "valid": 0,
+      "timeout": 13,
+      "error": 0
+    },
+    "fuzz_ctrl_msgelemslen": {
+      "uses": 9,
+      "valid": 0,
+      "timeout": 9,
+      "error": 0
+    },
+    "fuzz_elem_insert_unknown": {
+      "uses": 7,
+      "valid": 0,
+      "timeout": 7,
+      "error": 0
+    },
+    "brutal_insert_random_bytes": {
+      "uses": 19,
+      "valid": 0,
+      "timeout": 19,
+      "error": 0
+    },
+    "brutal_bitflip": {
+      "uses": 20,
+      "valid": 0,
+      "timeout": 20,
+      "error": 0
+    },
+    "fuzz_capwap_flags": {
+      "uses": 6,
+      "valid": 0,
+      "timeout": 6,
+      "error": 0
+    },
+    "fuzz_elem_type": {
+      "uses": 7,
+      "valid": 0,
+      "timeout": 7,
+      "error": 0
+    },
+    "fuzz_elem_value_type38": {
+      "uses": 9,
+      "valid": 0,
+      "timeout": 9,
+      "error": 0
+    },
+    "brutal_shuffle_bytes": {
+      "uses": 16,
+      "valid": 0,
+      "timeout": 16,
+      "error": 0
+    },
+    "fuzz_capwap_header": {
+      "uses": 8,
+      "valid": 0,
+      "timeout": 8,
+      "error": 0
+    },
+    "brutal_zero_segment": {
+      "uses": 21,
+      "valid": 1,
+      "timeout": 20,
+      "error": 0
+    },
+    "fuzz_ctrl_msgtype": {
+      "uses": 12,
+      "valid": 0,
+      "timeout": 12,
+      "error": 0
+    },
+    "fuzz_elem_length_overflow": {
+      "uses": 15,
+      "valid": 0,
+      "timeout": 15,
+      "error": 0
+    },
+    "fuzz_elem_drop": {
+      "uses": 9,
+      "valid": 0,
+      "timeout": 9,
+      "error": 0
+    },
+    "fuzz_ctrl_seqnum": {
+      "uses": 7,
+      "valid": 0,
+      "timeout": 7,
+      "error": 0
+    },
+    "brutal_duplicate_segment": {
+      "uses": 18,
+      "valid": 0,
+      "timeout": 18,
+      "error": 0
+    },
+    "brutal_delete_random_bytes": {
+      "uses": 13,
+      "valid": 0,
+      "timeout": 13,
+      "error": 0
+    },
+    "fuzz_ctrl_flags": {
+      "uses": 13,
+      "valid": 0,
+      "timeout": 13,
+      "error": 0
+    },
+    "brutal_truncate": {
+      "uses": 15,
+      "valid": 0,
+      "timeout": 15,
+      "error": 0
+    },
+    "fuzz_elem_length_zero": {
+      "uses": 10,
+      "valid": 0,
+      "timeout": 10,
+      "error": 0
+    },
+    "fuzz_elem_value": {
+      "uses": 6,
+      "valid": 0,
+      "timeout": 6,
+      "error": 0
+    },
+    "fuzz_elem_value_type39": {
+      "uses": 4,
+      "valid": 0,
+      "timeout": 4,
+      "error": 0
+    },
+    "fuzz_elem_duplicate": {
+      "uses": 10,
+      "valid": 0,
+      "timeout": 10,
+      "error": 0
+    },
+    "brutal_random_bytes": {
+      "uses": 19,
+      "valid": 0,
+      "timeout": 19,
+      "error": 0
+    },
+    "brutal_reverse_segment": {
+      "uses": 8,
+      "valid": 0,
+      "timeout": 8,
+      "error": 0
+    },
+    "fuzz_elem_drop_required": {
+      "uses": 12,
+      "valid": 0,
+      "timeout": 12,
+      "error": 0
+    },
+    "fuzz_capwap_fragment": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "fuzz_elem_order_shuffle": {
+      "uses": 8,
+      "valid": 1,
+      "timeout": 7,
+      "error": 0
+    }
+  },
+  "response_time_stats": {
+    "mean_ms": 2935,
+    "min_ms": 2,
+    "max_ms": 3006,
+    "p95_ms": 3004
+  },
+  "crash_detected": true,
+  "crash_at_round": 90,
+  "top_crash_methods": [
+    "brutal_random_bytes",
+    "brutal_zero_segment",
+    "brutal_duplicate_segment",
+    "brutal_insert_random_bytes",
+    "fuzz_ctrl_flags"
+  ],
+  "response_time_trend": {
+    "first_50_rounds_mean_ms": 2942,
+    "last_50_rounds_mean_ms": 2943,
+    "degradation_ratio": 1.0
+  }
+}

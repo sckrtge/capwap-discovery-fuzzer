@@ -1,0 +1,14 @@
+{
+  "crash_detected_at_round": 90,
+  "probe_attempts": 3,
+  "ac_ip": "192.168.33.128",
+  "ac_port": 5246,
+  "timestamp": "2026-04-15T17:03:38.446808",
+  "total_status": {
+    "total": 89,
+    "valid": 2,
+    "timeout": 87,
+    "error": 0,
+    "error_types": {}
+  }
+}

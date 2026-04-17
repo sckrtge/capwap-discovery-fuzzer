@@ -1,0 +1,137 @@
+{
+  "total": 10,
+  "valid": 0,
+  "timeout": 10,
+  "error": 0,
+  "error_types": {},
+  "method_effectiveness": {
+    "fuzz_elem_insert_unknown": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "brutal_insert_random_bytes": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "brutal_bitflip": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "fuzz_ctrl_msgtype": {
+      "uses": 1,
+      "valid": 0,
+      "timeout": 1,
+      "error": 0
+    },
+    "brutal_fill_segment": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "brutal_truncate": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "fuzz_capwap_flags": {
+      "uses": 1,
+      "valid": 0,
+      "timeout": 1,
+      "error": 0
+    },
+    "fuzz_elem_order_shuffle": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "brutal_reverse_segment": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "fuzz_capwap_wbid": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "fuzz_ctrl_seqnum": {
+      "uses": 4,
+      "valid": 0,
+      "timeout": 4,
+      "error": 0
+    },
+    "fuzz_elem_value_type39": {
+      "uses": 1,
+      "valid": 0,
+      "timeout": 1,
+      "error": 0
+    },
+    "fuzz_elem_duplicate": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "brutal_shuffle_bytes": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "fuzz_elem_value_type38": {
+      "uses": 2,
+      "valid": 0,
+      "timeout": 2,
+      "error": 0
+    },
+    "brutal_duplicate_segment": {
+      "uses": 3,
+      "valid": 0,
+      "timeout": 3,
+      "error": 0
+    },
+    "fuzz_elem_length_zero": {
+      "uses": 1,
+      "valid": 0,
+      "timeout": 1,
+      "error": 0
+    },
+    "brutal_delete_random_bytes": {
+      "uses": 1,
+      "valid": 0,
+      "timeout": 1,
+      "error": 0
+    }
+  },
+  "response_time_stats": {
+    "mean_ms": 3002,
+    "min_ms": 3000,
+    "max_ms": 3005,
+    "p95_ms": 3005
+  },
+  "crash_detected": true,
+  "crash_at_round": 10,
+  "top_crash_methods": [
+    "fuzz_ctrl_seqnum",
+    "fuzz_elem_insert_unknown",
+    "brutal_insert_random_bytes",
+    "brutal_reverse_segment",
+    "brutal_shuffle_bytes"
+  ],
+  "response_time_trend": {
+    "first_50_rounds_mean_ms": 3002,
+    "last_50_rounds_mean_ms": 3002,
+    "degradation_ratio": 1.0
+  }
+}

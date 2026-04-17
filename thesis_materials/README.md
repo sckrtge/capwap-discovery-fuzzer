@@ -11,9 +11,6 @@
 ```
 thesis_materials/
 ├── README.md                        ← 本文件（素材索引）
-├── reports/
-│   ├── opencapwap_experiment_report.md   ← OpenCAPWAP 灰盒实验完整报告
-│   └── cisco_experiment_report.md        ← Cisco C9800 黑盒实验完整报告
 ├── charts/
 │   ├── opencapwap/                  ← OpenCAPWAP 实验图表
 │   │   ├── session1_process_memory.png       内存增长曲线（含崩溃标记）
@@ -100,10 +97,10 @@ thesis_materials/
 | 1. 绪论 | 背景：CAPWAP 协议现状；研究意义：OpenCAPWAP漏洞 |
 | 2. 相关工作 | CAPWAP RFC 5415；模糊测试方法综述 |
 | 3. 系统设计与实现 | `CLAUDE.md` 架构描述；`src/` 源代码 |
-| 4.1 实验环境 | `reports/opencapwap_experiment_report.md` §1 |
+| 4.1 实验环境 | `experiments/opencapwap/experiment_report.md` §1 |
 | 4.2 灰盒实验结果 | §4 + §5 图表；`data/opencapwap/` |
 | 4.3 漏洞复现与根因 | §6 + §7；GDB backtrace |
-| 4.4 黑盒对比实验 | `reports/cisco_experiment_report.md` |
+| 4.4 黑盒对比实验 | `experiments/cisco/experiment_report.md` |
 | 5. 结论 | 三个漏洞总结；修复建议；与商用设备对比 |
 
 ---

@@ -35,7 +35,7 @@ The tool fuzzes CAPWAP (Control And Provisioning of Wireless Access Points) Disc
 1. `cli.py` — Typer CLI entry point, handles `--ac-ip`/`--broadcast`/`--pcap`/`--replay-json-dir`/`--iface`/`--probe-interval`/`--vendor` options, drives fuzzing rounds
 2. `capwap_discovery_fuzzer.py` — `CAPWAPDiscoveryFuzzer` orchestrates: creates/loads base packet, applies mutations, sends via Python native `socket` (UDP), classifies responses, appends one JSONL record per round to `./capwap_log/<timestamp>/records.jsonl`; writes `session.json` at startup and `summary.json` at end
 3. `request_creater.py` — Scapy packet class definitions (`CAPWAP_Header`, `Control_Header`, `MessageElement`, `WTPDescriptor`, etc.) + `Payload_Creator` for constructing valid or random discovery requests + `parse_discovery_request()` for loading from pcap
-4. `payload_fuzzer.py` — `Payload_Fuzzer` wraps a base packet; provides 21 structured "safe" fuzz methods (CAPWAP/Control header fields, element TLV fields, element structural ops) and 10 "brutal" raw-byte methods (overwrite, bitflip, insert, delete, zero/fill segment, duplicate, reverse, truncate, shuffle); all methods carry bilingual (EN/ZH) docstrings
+4. `payload_fuzzer.py` — `Payload_Fuzzer` wraps a base packet; provides 19 structured "safe" fuzz methods (CAPWAP/Control header fields, element TLV fields, element structural ops) and 10 "brutal" raw-byte methods (overwrite, bitflip, insert, delete, zero/fill segment, duplicate, reverse, truncate, shuffle); all methods carry bilingual (EN/ZH) docstrings
 5. `response_parser.py` — `ResponseParser` parses raw response bytes using Scapy, classifies as `valid`/`error`/`timeout`/`unknown`, raises typed errors from `errors.py`
 6. `errors.py` — Exception hierarchy: `CAPWAPFuzzerError` → `NoResponseError`, `InvalidResponseError` → `MissingCapwapHeaderError`, `MissingControlHeaderError`, `UnexpectedMsgTypeError`, `MissingRequiredElementError`, etc.; `CrashDetectedError`
 
@@ -524,7 +524,7 @@ src/capwap_discovery_fuzzer/
 ├── capwap_discovery_fuzzer.py   # 主 Fuzzer 类
 ├── cli.py                       # Typer CLI 入口
 ├── errors.py                    # 异常层级
-├── payload_fuzzer.py            # 21 个 safe + 10 个 brutal 变异方法
+├── payload_fuzzer.py            # 19 个 safe + 10 个 brutal 变异方法
 ├── request_creater.py           # Scapy 报文类 + Payload_Creator
 ├── response_parser.py           # 响应解析与分类
 ├── utils.py

@@ -16,8 +16,8 @@ A fuzzing tool for CAPWAP (Control And Provisioning of Wireless Access Points) D
 
 - **Unicast and broadcast modes** — target a specific AC IP or send to `255.255.255.255`
   **单播与广播模式** — 指定目标 AC IP 或向 `255.255.255.255` 广播
-- **Structured mutations** — 21 named methods covering CAPWAP/Control header fields, all message element TLV fields, element structure operations, and flag combinations
-  **结构化变异** — 21 个具名方法，覆盖 CAPWAP/Control 头部字段、消息元素 TLV 字段、元素结构操作及标志位组合
+- **Structured mutations** — 19 named methods covering CAPWAP/Control header fields, all message element TLV fields, element structure operations, and flag combinations
+  **结构化变异** — 19 个具名方法，覆盖 CAPWAP/Control 头部字段、消息元素 TLV 字段、元素结构操作及标志位组合
 - **Byte-level mutations** — 10 methods: random overwrites, bit flips, insertions, deletions, segment zero-fill/repeat-fill, duplication, reversal, shuffle, and truncation
   **字节级变异** — 10 个方法：随机覆写、位翻转、插入、删除、区间清零/填充、片段复制/反转、全字节乱序、截断
 - **Chained mutation strategy** — structured mutations first (Scapy-parseable), byte-level after; `brutal_shuffle_bytes` forced to chain end
@@ -213,7 +213,7 @@ capwap_log/20240101_120000/
 src/capwap_discovery_fuzzer/
 ├── cli.py                        # Typer CLI 入口
 ├── capwap_discovery_fuzzer.py    # 核心 Fuzzer 类
-├── payload_fuzzer.py             # 31 个变异方法（21 safe + 10 brutal）
+├── payload_fuzzer.py             # 29 个变异方法（19 safe + 10 brutal）
 ├── request_creater.py            # Scapy 报文类 + Payload_Creator
 ├── response_parser.py            # 响应解析与分类
 ├── errors.py                     # 异常层级

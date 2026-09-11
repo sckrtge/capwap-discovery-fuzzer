@@ -94,7 +94,9 @@ class ResponseParser:
             if pkt[Control_Header].MsgType != 2:
                 raise UnexpectedMsgTypeError(f"Unexpected MsgType {pkt[Control_Header].MsgType}", raw_data)
 
-            # 必要元素检查：Type 必须都出现 1,4,10
+            # 必要元素检查：RFC 5415 §5.2/§5.4 规定 Discovery Response 必须含
+            # AC Descriptor(1)、AC Name(4)，以及 CAPWAP Control IPv4/IPv6 Address
+            # 二选一（这里按 Type 10 检查）。类型号见 §4.6.x 的 "Type: N for ..." 行。
             elem = pkt[Control_Header].payload
             present_types = self._collect_types(elem)
             required_types = {1, 4, 10}

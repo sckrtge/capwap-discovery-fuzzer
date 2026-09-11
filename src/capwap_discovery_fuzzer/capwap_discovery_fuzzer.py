@@ -12,6 +12,7 @@ from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
 from . import lock_fuzzer
 from . import monitor
+from . import conformance
 from .errors import *
 
 MUTATION_COUNT = 1  # 每轮发送报文条数
@@ -139,6 +140,23 @@ class CAPWAPDiscoveryFuzzer:
             "response_hex": raw_response.hex() if raw_response else "",
             "elapsed_ms": elapsed_ms,
         }
+
+        # RFC conformance is reported alongside, not instead of, the shape verdict.
+        # response_type must keep its old meaning so sessions stay comparable; the
+        # Discovery family carries no admission result anyway (RFC 5415 §5.2/§5.4),
+        # so "valid" only ever meant "a well-formed reply arrived".
+        # 合规性作为独立字段记录，不改变 response_type 的既有含义（保持历史可比）。
+        try:
+            req_report = conformance.check_message(capwap_bytes)
+            resp_report = conformance.check_message(raw_response) if raw_response else None
+            record["rfc"] = {
+                "request_conformant": req_report.conformant,
+                "request_violations": req_report.violations,
+                "response_conformant": None if resp_report is None else resp_report.conformant,
+                "response_violations": [] if resp_report is None else resp_report.violations,
+            }
+        except Exception as exc:  # noqa: BLE001 - a checker bug must not lose the record
+            logging.warning("RFC conformance check failed: %s", exc)
         with open(self.records_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -540,6 +558,28 @@ class CAPWAPDiscoveryFuzzer:
 
         summary = dict(total_status)
         summary["method_effectiveness"] = method_stats
+
+        # RFC conformance rate: a secondary metric next to the response rate, so a
+        # run can say how much of what it sent (and received) was standards-legal.
+        # 合规率：与回包率并列的辅指标（request/response 两侧分别统计）。
+        conf = {"rounds": 0, "request_conformant": 0, "response_checked": 0,
+                "response_conformant": 0, "by_violation": {}}
+        for r in all_records:
+            rfc = r.get("rfc")
+            if not rfc:
+                continue
+            conf["rounds"] += 1
+            if rfc.get("request_conformant"):
+                conf["request_conformant"] += 1
+            if rfc.get("response_conformant") is not None:
+                conf["response_checked"] += 1
+                if rfc["response_conformant"]:
+                    conf["response_conformant"] += 1
+            for violation in rfc.get("response_violations", []):
+                key = violation.split(" (RFC")[0]
+                conf["by_violation"][key] = conf["by_violation"].get(key, 0) + 1
+        if conf["rounds"]:
+            summary["rfc_conformance"] = conf
 
         # Response time stats
         if elapsed_list:

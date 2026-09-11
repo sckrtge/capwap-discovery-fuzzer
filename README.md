@@ -263,6 +263,8 @@ Full report: [`experiments/opencapwap/experiment_report.md`](experiments/opencap
 
 3次独立实验（各200轮），无崩溃，无DoS：
 
+> **【2026-09-11 errata / 勘误】** 本节数值产自含空操作缺陷的发布版提交 `d4fd358`：`_iter_message_elements()` 使用 `getlayer(MessageElement, 0)`，Scapy 的 `nb` 从 1 起计数使其恒返回空列表，11/20 个结构化变异方法为空操作。故 **~7% valid rate 与"元素级变异被容忍"的结论均不可引用**，且该批原始 records 已丢失。仍成立：MsgType=19 AND MsgElemsLen=231 的过滤条件、三处低危 RFC 偏差。详见 [`experiments/cisco/experiment_report.md`](experiments/cisco/experiment_report.md) 顶部勘误，与工作区 `docs/PROJECT_INVENTORY.md` 的"fuzzer 增量式升级计划（修订版 v2）"。
+
 | Metric | Value |
 |--------|-------|
 | Valid rate / valid 率 | ~7% |

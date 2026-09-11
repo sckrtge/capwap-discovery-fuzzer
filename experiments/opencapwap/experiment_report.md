@@ -8,6 +8,11 @@
 
 ---
 
+> **【2026-09-11 勘误｜元素级方法行已作废】**
+> 发布版提交 `d4fd358` 中 `_iter_message_elements()` 使用 `getlayer(MessageElement, 0)`，Scapy 的 `nb` 从 1 起计数使其恒返回空列表，11/20 个结构化变异方法为**静默空操作**。故本报告"变异方法有效性"表中全部 `fuzz_elem_*` 行（含 4.6 节的 `fuzz_elem_length`、`fuzz_elem_length_overflow`、`fuzz_elem_drop_required`、`fuzz_elem_value`、`fuzz_elem_order_shuffle`）**已作废**，其"有效"来自同轮其它方法或未变异种子。
+> **不受影响**：崩溃与漏洞结论（VULN-01/02/03 经字节级 brutal 路径与任意畸形包路径复现，修复版重放已验证）、DoS 与响应时间退化观察。
+> 现行计划见工作区 `docs/PROJECT_INVENTORY.md` 的"fuzzer 增量式升级计划（修订版 v2）"。
+
 ## 1. 实验环境
 
 | 项目 | 值 |

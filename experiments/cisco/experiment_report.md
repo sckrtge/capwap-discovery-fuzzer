@@ -8,6 +8,13 @@
 
 ---
 
+> **【2026-09-11 勘误｜本报告部分结论已作废】**
+> 本实验运行的发布版提交 `d4fd358` 中，`payload_fuzzer.py` 的 `_iter_message_elements()` 写成 `pkt.getlayer(MessageElement, i)` 且 `i` 从 0 开始；Scapy 的 `nb` 参数从 1 起计数，因此该函数恒返回空列表，11/20 个结构化变异方法（全部字段类 `fuzz_elem_*` 与除 `fuzz_elem_insert_unknown` 外的结构类方法）为**静默空操作**。
+> **已作废**：第 4.3 节"变异方法有效性"中全部 `fuzz_elem_*` 行；"C9800 对元素层面的轻度变异有较高容忍度"这一核心规律；以及由空操作直接导致的"删除元素后解析列表仍完整"等发现——这些轮次实际发送的是未变异的种子报文。
+> **~7% valid 率不能作为修复版 fuzzer 的对照基线**：该批次含约 34% 安全方法全部空转的轮次，valid 样本与未变异种子混合，且 04-17 三个会话的原始 records 已于 2026-09-10 丢失，无法事后复核。
+> **仍然成立**：MsgType=19 AND MsgElemsLen=231 的入口过滤条件（42 条 valid 报文字段统计；`fuzz_ctrl_msgelemslen` 600 轮 0 次 valid；该样本有偏，待新基线复核）；ISSUE-01/02/03 三处低危 RFC 合规偏差（`capwap_*` 方法本身工作正常）。
+> 现行执行序与验收方式见工作区 `docs/PROJECT_INVENTORY.md` 的"fuzzer 增量式升级计划（修订版 v2）"。
+
 ## 1. 实验环境
 
 | 项目 | 值 |

@@ -154,6 +154,75 @@ python tools/compare_sessions.py capwap_log/ --vendor opencapwap
 | `--on-probe-fail` | `continue` | `continue` (record DoS) or `stop` (halt immediately) / 探测失败行为 |
 | `--vendor` | `opencapwap` | `opencapwap` (gray-box), `cisco` (C9800), `generic` (black-box) / 厂商模式 |
 | `--lock-fields` | — | Locked mutation mode: comma-separated regions to FREEZE — `capwap-header`, `msgtype`, `msgelemslen`, `cisco-fingerprint`, or `all` / 字段锁定模式：要冻结的区域 |
+| `--monitor-host` | — | Enable built-in gray-box SSH monitoring against this host (off by default) / 启用内置灰盒监控的目标主机 |
+| `--monitor-user` | `lab` | SSH user for `--monitor-host` / 监控用 SSH 用户 |
+| `--monitor-credential-file` | — | File holding the SSH password (never written to `session.json`) / 存放 SSH 口令的文件 |
+| `--monitor-interval` | `20` | Monitoring sampling PERIOD in seconds, start to start / 监控采样周期（秒） |
+| `--monitor-raw` / `--no-monitor-raw` | `on` | Store raw per-command output in `monitor.jsonl` / 是否在采样记录中保存原始命令输出 |
+| `--forensics` / `--no-forensics` | `on` | On anomaly: local evidence first, then a time-boxed device pull / 异常时先落盘本地证据再做限时设备侧取证 |
+
+---
+
+## Gray-box monitoring / 灰盒监控
+
+Built into the fuzzing process (no separate sidecar), so a sample and the rounds
+it belongs to share one clock and one log dir. Sampling is read-only `show`
+output over one SSH vty.
+
+```bash
+python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco \
+    --rounds 200 --seed 424242 --lock-fields all \
+    --monitor-host 192.168.33.134 --monitor-user lab \
+    --monitor-credential-file ~/.config/capwap-lab/c9800-pwn-ssh.secret \
+    --monitor-interval 20
+```
+
+Every record in `<session>/monitor.jsonl` carries:
+
+| Field | Meaning |
+|---|---|
+| `window_start` / `window_end` / `duration_s` | The poll's time window; intervals are start-to-start |
+| `round_at_start` / `round_at_end` | Fuzz rounds the sample spans (`records.jsonl` holds per-round timestamps too) |
+| `ssh_ok` | False if any command failed — an **anomaly signal**, never a crash verdict by itself |
+| `valid_sample` | False if the target answered but produced no usable output |
+| `cpu`, `sysmem`, `mem_procs`, `ap_count` | Parsed fields (CPU platform total; RSS per daemon; AP count) |
+| `raw` | Per-command output verbatim, so a parser miss can be fixed offline |
+
+`--monitor-interval` is a **sampling period**: the loop sleeps `interval -
+elapsed`, so start-to-start spacing is ~interval. One poll takes ~18s on a
+C9800-CL (dominated by `show processes memory platform sorted`), so values below
+that overlap instead of sampling faster — trim the command set if you need a
+tighter period. If `paramiko` is missing the monitor records one explanatory
+sample and stops rather than taking the fuzzer down with it.
+
+## Crash forensics / 崩溃取证
+
+On an anomaly the order is fixed: **local evidence is written first**, then a
+device pull is attempted under a deadline. A target whose SSH is as unwell as its
+CAPWAP service therefore cannot cost you the local record, and a failed pull
+never stops the run from exiting.
+
+```bash
+# full: local evidence + device diagnostics (needs --monitor-host for credentials)
+python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco \
+    --rounds 200 --monitor-host 192.168.33.134 \
+    --monitor-credential-file ~/.config/capwap-lab/c9800-pwn-ssh.secret
+
+# local evidence only
+python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco --no-forensics
+```
+
+| Artifact | Content |
+|---|---|
+| `<session>/evidence.json` | Reason, round, status, probe result, runtime versions, `code` fingerprint (git commit + dirty-file list + package hash), monitor window summary, and a size/sha256 index of every other artifact |
+| `<session>/device_evidence/*.txt` | Verbatim output of the read-only diagnostic commands |
+| `<session>/device_evidence/device_evidence.json` | Per-command duration, bytes, sha256; plus what failed and what the deadline skipped |
+
+The device command set is deliberately narrow (`show version`, CPU/memory,
+`dir bootflash: | include crashinfo`, filtered `show logging`) because
+`show tech-support` is far too large to pull from a device that may be unwell.
+A first liveness failure inside the loop writes local evidence only (to stay
+fast); the full local + device collection runs on a confirmed crash.
 
 ---
 

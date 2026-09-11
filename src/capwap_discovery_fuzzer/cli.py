@@ -11,12 +11,45 @@ from datetime import datetime
 
 from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from .errors import CrashDetectedError
+from . import forensics
+from . import monitor
 from .lock_fuzzer import parse_lock_fields
 from .vendors import get_vendor, DEFAULT_VENDOR
 from .vendors.opencapwap.fuzzer import OpenCAPWAPFuzzer
 
 app = typer.Typer()
 console = Console()
+
+
+def _collect_forensics(fuzzer, reason: str, round_number, status: dict, probe: dict,
+                       enabled: bool) -> None:
+    """Write local evidence, then attempt a time-boxed device pull.
+
+    Never raises: a failure to collect evidence must not mask the anomaly that
+    triggered it, and must not stop the process from exiting.
+    """
+    if not enabled:
+        return
+    try:
+        result = forensics.collect_on_anomaly(
+            fuzzer.log_dir, reason=reason, round_number=round_number, status=status,
+            probe=probe,
+            device_session_factory=fuzzer.device_session_factory(),
+            extra={"monitor_summary": fuzzer.monitor_summary()},
+        )
+        console.print(f"[yellow][*] Forensics : local evidence -> {result['local_evidence']}[/yellow]")
+        device = result.get("device") or {}
+        if device.get("attempted") is False:
+            console.print(f"[dim]    device evidence skipped: {device.get('reason')}[/dim]")
+        else:
+            console.print(
+                f"[dim]    device evidence: {len(device.get('captured', []))} captured, "
+                f"{len(device.get('failed', []))} failed, "
+                f"{len(device.get('skipped', []))} skipped[/dim]"
+            )
+    except Exception as exc:  # noqa: BLE001 - forensics must never mask the anomaly
+        logging.warning("forensics collection failed: %s", exc)
+        console.print(f"[red][-] Forensics collection failed: {exc}[/red]")
 
 
 @app.command()
@@ -98,6 +131,49 @@ def fuzz(
             'In continue mode, 3 consecutive probe failures trigger a definitive crash stop.'
         )
     ),
+    monitor_host: str | None = typer.Option(
+        None,
+        '--monitor-host',
+        help=(
+            'Enable gray-box SSH monitoring against this host (default: off). Read-only show '
+            'commands are polled into monitor.jsonl with raw output, timestamps and the fuzz '
+            'round range each sample covers.'
+        )
+    ),
+    monitor_user: str = typer.Option(
+        'lab',
+        '--monitor-user',
+        help='SSH user for --monitor-host'
+    ),
+    monitor_credential_file: Path | None = typer.Option(
+        None,
+        '--monitor-credential-file',
+        exists=True,
+        readable=True,
+        dir_okay=False,
+        help='File holding the SSH password for --monitor-host (the value is never written to session.json)'
+    ),
+    monitor_interval: float = typer.Option(
+        20.0,
+        '--monitor-interval',
+        help=(
+            'Monitor sampling PERIOD in seconds, start to start. One poll takes ~18s on a '
+            'C9800-CL, so smaller values overlap instead of sampling faster.'
+        )
+    ),
+    monitor_raw: bool = typer.Option(
+        True,
+        '--monitor-raw/--no-monitor-raw',
+        help='Store raw per-command output in monitor.jsonl (default: on)'
+    ),
+    forensics_enabled: bool = typer.Option(
+        True,
+        '--forensics/--no-forensics',
+        help=(
+            'On anomaly: write local evidence first (always possible), then pull read-only device '
+            'diagnostics under a deadline. Device pull needs --monitor-host for credentials.'
+        )
+    ),
     lock_fields: str | None = typer.Option(
         None,
         '--lock-fields',
@@ -131,6 +207,18 @@ def fuzz(
     except ValueError as exc:
         raise typer.BadParameter(str(exc))
 
+    monitor_config = None
+    if monitor_host:
+        if monitor_credential_file is None:
+            raise typer.BadParameter("--monitor-host requires --monitor-credential-file")
+        monitor_config = monitor.MonitorConfig(
+            host=monitor_host,
+            user=monitor_user,
+            credential_file=str(monitor_credential_file.expanduser().resolve()),
+            interval=monitor_interval,
+            raw=monitor_raw,
+        )
+
     if seed is None:
         seed = int(time.time_ns())
 
@@ -139,7 +227,7 @@ def fuzz(
     if fuzzer_cls is None:
         supported = "opencapwap, cisco, generic"
         raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: {supported}")
-    fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface, lock_fields=lock_set)
+    fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface, lock_fields=lock_set, monitor_config=monitor_config)
 
     # 统一配置 logging，写入 fuzzer 的 log 目录。
     # 必须先清除 root logger 上已有的 handlers（fuzzer __init__ 内的 logging 调用
@@ -167,6 +255,8 @@ def fuzz(
         "pcap": pcap_path,
         "replay_jsonl": str(replay_jsonl) if replay_jsonl else None,
         "lock_fields": sorted(lock_set) if lock_set else None,
+        "monitor": monitor_config.public_dict() if monitor_config else None,
+        "forensics": forensics_enabled,
     })
 
     console.rule("[bold blue]CAPWAP Discovery Fuzzing[/bold blue]")
@@ -183,6 +273,11 @@ def fuzz(
         console.print(
             f"[+] Lock      : {', '.join(sorted(lock_set))} "
             f"(equal-length value mutation only)"
+        )
+    if monitor_config:
+        console.print(
+            f"[+] Monitor   : {monitor_config.host} as {monitor_config.user} "
+            f"every {monitor_config.interval:g}s -> {fuzzer.log_dir / 'monitor.jsonl'}"
         )
     console.print(f"[+] Log dir   : {fuzzer.log_dir}")
 
@@ -215,6 +310,7 @@ def fuzz(
         # process_monitor.csv instead of replay silently exiting 0.
         if isinstance(fuzzer, OpenCAPWAPFuzzer):
             fuzzer.start_process_monitor()
+        fuzzer.start_monitor()
         filter_fn = (lambda r: r.get("response_type") == replay_filter) if replay_filter else None
         console.print(f"[cyan][*] Replaying records from {replay_jsonl}...[/cyan]")
         results = fuzzer.replay_requests_from_jsonl(str(replay_jsonl), filter_fn=filter_fn)
@@ -228,6 +324,7 @@ def fuzz(
 
         # Bug fix: detect a target that died during replay (previously replay
         # exited 0 with no crash artifacts even after killing the target).
+        fuzzer.stop_monitor()
         if isinstance(fuzzer, OpenCAPWAPFuzzer):
             fuzzer.stop_process_monitor()
             if fuzzer.is_process_alive() is False:
@@ -247,6 +344,10 @@ def fuzz(
                 console.print(f"[bold red][!] AC process died during replay — crash report saved to {report_path}[/bold red]")
                 fuzzer.write_crash_sequence(last_n=50)
                 fuzzer.write_summary(total_status, crash_at_round=crash_round)
+                _collect_forensics(
+                    fuzzer, reason="crash", round_number=crash_round, status=total_status,
+                    probe={"context": "replay", "probe_attempts": 0}, enabled=forensics_enabled,
+                )
                 sys.exit(2)
 
     # -------------------- Fuzzing 模式 --------------------
@@ -255,6 +356,7 @@ def fuzz(
         # Start process monitor sidecar (only available on OpenCAPWAPFuzzer)
         if isinstance(fuzzer, OpenCAPWAPFuzzer):
             fuzzer.start_process_monitor()
+        fuzzer.start_monitor()
 
         with Progress(
             SpinnerColumn(),
@@ -275,6 +377,24 @@ def fuzz(
             suspected_recorded = False          # suspected_event.json 只写一次
             first_fail_round: int | None = None
             MAX_CONSECUTIVE_FAILURES = 3        # 连续失败超过此值视为 crash
+
+            def _record_local_evidence(reason: str, rnd: int, probe_info: dict) -> None:
+                """Write local evidence at the first liveness failure.
+
+                Local only: this runs inside the fuzzing loop, so it must stay
+                fast. The full local + device collection happens on a confirmed
+                crash (see the crash-report block below).
+                """
+                if not forensics_enabled:
+                    return
+                try:
+                    forensics.write_local_evidence(
+                        fuzzer.log_dir, reason=reason, round_number=rnd,
+                        status=total_status, probe=probe_info,
+                        extra={"monitor_summary": fuzzer.monitor_summary()},
+                    )
+                except Exception as exc:  # noqa: BLE001 - evidence must not break the loop
+                    logging.warning("local evidence failed: %s", exc)
 
             for i in range(rounds):
                 try:
@@ -314,6 +434,10 @@ def fuzz(
                                     first_fail_round = i
                                     fuzzer.write_suspected_event(round_number=i, total_status=total_status)
                                     suspected_recorded = True
+                                    _record_local_evidence(
+                                        "dos_suspected", i,
+                                        {"alive": False, "proc_alive": proc_alive},
+                                    )
                                     progress.console.print(
                                         f"[yellow][!] Probe failed at round {i + 1} — "
                                         f"process alive, no UDP reply → DoS suspected, continuing...[/yellow]"
@@ -338,6 +462,10 @@ def fuzz(
                                     first_fail_round = i
                                     fuzzer.write_suspected_event(round_number=i, total_status=total_status)
                                     suspected_recorded = True
+                                    _record_local_evidence(
+                                        "dos_suspected", i,
+                                        {"alive": False, "proc_alive": proc_alive},
+                                    )
                                     progress.console.print(
                                         f"[yellow][!] Probe failed at round {i + 1} "
                                         f"(consecutive: {consecutive_probe_failures}) — "
@@ -403,9 +531,10 @@ def fuzz(
                         progress.advance(task, 1)
                     time.sleep(sleep_per_round)
 
-        # -------------------- 停止进程监控 --------------------
+        # -------------------- 停止进程监控 / 灰盒采样 --------------------
         if isinstance(fuzzer, OpenCAPWAPFuzzer):
             fuzzer.stop_process_monitor()
+        fuzzer.stop_monitor()
 
         # -------------------- Crash 报告 --------------------
         if crash_error is not None:
@@ -424,6 +553,17 @@ def fuzz(
             fuzzer.write_crash_sequence(last_n=50)
             console.print(f"[bold red][!] Crash sequence saved to {fuzzer.log_dir / 'crash_sequence.jsonl'}[/bold red]")
             fuzzer.write_summary(total_status, crash_at_round=crash_error.round_number)
+            _collect_forensics(
+                fuzzer, reason="crash", round_number=crash_error.round_number,
+                status=total_status,
+                probe={
+                    "alive": False,
+                    "probe_attempts": crash_error.probe_attempts,
+                    "ac_ip": crash_error.ac_ip,
+                    "ac_port": crash_error.ac_port,
+                },
+                enabled=forensics_enabled,
+            )
             sys.exit(2)
 
     # -------------------- 汇总统计 --------------------

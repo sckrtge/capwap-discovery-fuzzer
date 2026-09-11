@@ -11,6 +11,7 @@ from .request_creater import Payload_Creator, parse_discovery_request
 from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
 from . import lock_fuzzer
+from . import monitor
 from .errors import *
 
 MUTATION_COUNT = 1  # 每轮发送报文条数
@@ -18,7 +19,8 @@ MUTATION_COUNT = 1  # 每轮发送报文条数
 class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
                  seed: int | None = None, broadcast: bool = False, iface: str = 'lo',
-                 lock_fields: set[str] | None = None):
+                 lock_fields: set[str] | None = None,
+                 monitor_config: monitor.MonitorConfig | None = None):
         self.ac_ip = ac_ip
         self.ac_port = ac_port
         self.timeout = timeout
@@ -30,6 +32,15 @@ class CAPWAPDiscoveryFuzzer:
         # 锁定模式（默认关闭）：设置后每轮只在 --lock-fields 允许的区间内变异，
         # 不再走通用 safe/brutal 方法池；为 None 时行为与原先逐字节一致。
         self.lock_fields = lock_fields
+        # Gray-box monitoring (opt-in) is owned by this process rather than run as
+        # a separate sidecar, so samples and rounds share one clock and one log.
+        # 灰盒监控（默认关闭）由本进程自己持有，采样与轮次共用同一时钟与日志。
+        self.monitor_config = monitor_config
+        self._monitor: monitor.C9800Monitor | None = None
+        # Shared round counter: fuzzing() writes it, the monitor thread reads it
+        # so every sample can be attributed to the rounds it spans.
+        # 共享轮次计数器：fuzzing() 写入，监控线程读取，用于把采样归因到轮次。
+        self._current_round: list[int] = [0]
         self.seed = seed if seed is not None else random.SystemRandom().randint(0, 2**32 - 1)
         self._rng = random.Random(self.seed)
 
@@ -208,10 +219,45 @@ class CAPWAPDiscoveryFuzzer:
         """
         return None
 
+    # -------------------- 灰盒监控（内化，可选） --------------------
+    def start_monitor(self) -> None:
+        """Start the SSH sampler thread when a monitor config was supplied.
+
+        仅在配置了 --monitor-host 时启动；未配置时是空操作，行为与之前一致。
+        """
+        if self.monitor_config is None:
+            return
+        self._monitor = monitor.C9800Monitor(
+            self.monitor_config, self.log_dir / "monitor.jsonl", self._current_round)
+        self._monitor.start()
+
+    def stop_monitor(self, timeout: float = 30.0) -> None:
+        """Stop the sampler and let it flush the last record."""
+        if self._monitor is not None:
+            self._monitor.stop(timeout=timeout)
+
+    def monitor_summary(self) -> dict | None:
+        return self._monitor.summary() if self._monitor is not None else None
+
+    def device_session_factory(self):
+        """Session factory for crash forensics, or None when unconfigured.
+
+        Reuses the monitor credentials: the same host/user/credential that polls
+        the device is the one asked for crashinfo after an anomaly.
+        """
+        if self.monitor_config is None:
+            return None
+        return lambda: monitor.ParamikoSSHSession(self.monitor_config)
+
     # -------------------- Fuzzing --------------------
     def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3,
                 max_brutal_methods: int = 3, round_number: int | None = None):
         status = {"valid": 0, "timeout": 0, "error": 0, "total": 0, "error_types": {}}
+
+        # Publish the round so the monitor thread can stamp its samples with the
+        # round range they cover (灰盒采样与轮次的关联依据).
+        if round_number is not None:
+            self._current_round[0] = round_number
 
         if pcap_path:
             base_pkt = self.load_request_from_pcap(pcap_path)

@@ -242,9 +242,10 @@ def test_monitor_poll_commands_records_one_bad_command(tmp_path):
     assert raw["show clock"] == CLOCK_OUTPUT
 
 
-def test_monitor_noop_when_not_configured():
+def test_monitor_noop_when_not_configured(tmp_path, monkeypatch):
     from capwap_discovery_fuzzer.capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 
+    monkeypatch.chdir(tmp_path)       # never write capwap_log/ into the checkout
     fuzzer = CAPWAPDiscoveryFuzzer(ac_ip="127.0.0.1", seed=1)
     assert fuzzer.monitor_config is None
     fuzzer.start_monitor()            # must not create a thread or raise

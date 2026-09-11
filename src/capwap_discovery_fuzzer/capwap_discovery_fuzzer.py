@@ -10,18 +10,26 @@ from scapy.all import *
 from .request_creater import Payload_Creator, parse_discovery_request
 from .payload_fuzzer import Payload_Fuzzer
 from .response_parser import ResponseParser
+from . import lock_fuzzer
 from .errors import *
 
 MUTATION_COUNT = 1  # 每轮发送报文条数
 
 class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
-                 seed: int | None = None, broadcast: bool = False, iface: str = 'lo'):
+                 seed: int | None = None, broadcast: bool = False, iface: str = 'lo',
+                 lock_fields: set[str] | None = None):
         self.ac_ip = ac_ip
         self.ac_port = ac_port
         self.timeout = timeout
         self.broadcast = broadcast
         self.iface = iface
+        # Locked mode (opt-in): when set, every round mutates only inside the
+        # spans that --lock-fields leaves mutable, and the general safe/brutal
+        # pools are bypassed. None keeps the original behaviour untouched.
+        # 锁定模式（默认关闭）：设置后每轮只在 --lock-fields 允许的区间内变异，
+        # 不再走通用 safe/brutal 方法池；为 None 时行为与原先逐字节一致。
+        self.lock_fields = lock_fields
         self.seed = seed if seed is not None else random.SystemRandom().randint(0, 2**32 - 1)
         self._rng = random.Random(self.seed)
 
@@ -289,32 +297,47 @@ class CAPWAPDiscoveryFuzzer:
                 return 5
 
         for i in range(MUTATION_COUNT):
-            pkt = base_pkt.copy()
-            method_chain = []
+            if self.lock_fields is not None:
+                # Locked mode: one equal-length edit inside one mutable span.
+                # 锁定模式：在单一可变异区间内做一次等长覆写。
+                raw = bytes(base_pkt)
+                spans = lock_fuzzer.mutable_spans(raw, self.lock_fields)
+                if not spans:
+                    logging.warning(
+                        "Locked mode: no mutable span for this base packet "
+                        "(freeze=%s); the seed is sent unmutated",
+                        sorted(self.lock_fields),
+                    )
+                mutated, label = lock_fuzzer.mutate_equal_length(raw, spans, self._rng)
+                pkt = Raw(mutated)
+                method_chain = [label]
+            else:
+                pkt = base_pkt.copy()
+                method_chain = []
 
-            # Allow repeated selection so methods like fuzz_elem_value can mutate
-            # multiple different elements in a single round.
-            # 允许重复选取，使 fuzz_elem_value 等方法能在同一轮内变异多个不同元素。
-            num_safe = self._rng.randint(1, max_safe_methods)
-            chosen_safe = self._rng.choices(safe_methods, k=num_safe)
-            chosen_safe.sort(key=sort_key)
+                # Allow repeated selection so methods like fuzz_elem_value can mutate
+                # multiple different elements in a single round.
+                # 允许重复选取，使 fuzz_elem_value 等方法能在同一轮内变异多个不同元素。
+                num_safe = self._rng.randint(1, max_safe_methods)
+                chosen_safe = self._rng.choices(safe_methods, k=num_safe)
+                chosen_safe.sort(key=sort_key)
 
-            for method in chosen_safe:
-                pkt = method(pkt)
-                method_chain.append(getattr(method, "__name__", str(method)))
+                for method in chosen_safe:
+                    pkt = method(pkt)
+                    method_chain.append(getattr(method, "__name__", str(method)))
 
-            # brutal_shuffle_bytes is terminal: if selected, move it to the end and
-            # drop any brutal methods that were chosen after it (they'd be no-ops).
-            # brutal_shuffle_bytes 是终结步：若被选中，移至末尾并丢弃其后的方法。
-            num_brutal = self._rng.randint(1 if self._rng.random() < 0.75 else 0, max_brutal_methods)
-            chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)
-            if any(m in TERMINAL_BRUTAL for m in chosen_brutal):
-                chosen_brutal = [m for m in chosen_brutal if m not in TERMINAL_BRUTAL]
-                chosen_brutal.append(fuzzer.brutal_shuffle_bytes)
+                # brutal_shuffle_bytes is terminal: if selected, move it to the end and
+                # drop any brutal methods that were chosen after it (they'd be no-ops).
+                # brutal_shuffle_bytes 是终结步：若被选中，移至末尾并丢弃其后的方法。
+                num_brutal = self._rng.randint(1 if self._rng.random() < 0.75 else 0, max_brutal_methods)
+                chosen_brutal = self._rng.choices(brutal_methods, k=num_brutal)
+                if any(m in TERMINAL_BRUTAL for m in chosen_brutal):
+                    chosen_brutal = [m for m in chosen_brutal if m not in TERMINAL_BRUTAL]
+                    chosen_brutal.append(fuzzer.brutal_shuffle_bytes)
 
-            for method in chosen_brutal:
-                pkt = method(pkt)
-                method_chain.append(getattr(method, "__name__", str(method)))
+                for method in chosen_brutal:
+                    pkt = method(pkt)
+                    method_chain.append(getattr(method, "__name__", str(method)))
 
             iteration = round_number if round_number is not None else (i + 1)
             request_info = {"iteration": iteration, "method_chain": method_chain}

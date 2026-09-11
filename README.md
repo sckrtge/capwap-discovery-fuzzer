@@ -36,6 +36,8 @@ A fuzzing tool for CAPWAP (Control And Provisioning of Wireless Access Points) D
   **灰盒模式（OpenCAPWAP）** — `--vendor opencapwap`（默认）：自动 `pgrep AC` 获取 PID，后台线程每秒采样 `/proc/<pid>/status` 写 `process_monitor.csv`，三态检测区分 Crash 与 DoS
 - **Vendor extension** — `--vendor cisco` activates Cisco C9800 WLC mode: authentic AP discovery packet structure, accepts MsgType=2/20, extracts Cisco VSP fields
   **厂商扩展** — `--vendor cisco` 启用 Cisco C9800 WLC 模式：真实 AP 报文结构，接受 MsgType=2/20，提取 Cisco VSP 字段
+- **Field-lock mode** — `--lock-fields` (opt-in, default off) freezes the regions an AC entry filter checks and confines each round to one equal-length overwrite inside a mutable span, so packet length and element structure are preserved and replies stay attributable to element parsing; see [Field-lock mode](#field-lock-mode--字段锁定模式)
+  **字段锁定模式** — `--lock-fields`（默认关闭）冻结 AC 入口过滤所检查的区域，每轮只在可变异区间内做一次等长覆写，保持报文长度与元素结构，使回包可归因到元素解析
 - **Analysis tools** — `tools/analyze_results.py` (single session charts) and `tools/compare_sessions.py` (multi-session comparison)
   **分析脚本** — `tools/analyze_results.py`（单会话图表）和 `tools/compare_sessions.py`（多会话对比）
 
@@ -151,6 +153,50 @@ python tools/compare_sessions.py capwap_log/ --vendor opencapwap
 | `--probe-interval` | `10` | Liveness check every N rounds; 0 = disabled / 每 N 轮存活探测 |
 | `--on-probe-fail` | `continue` | `continue` (record DoS) or `stop` (halt immediately) / 探测失败行为 |
 | `--vendor` | `opencapwap` | `opencapwap` (gray-box), `cisco` (C9800), `generic` (black-box) / 厂商模式 |
+| `--lock-fields` | — | Locked mutation mode: comma-separated regions to FREEZE — `capwap-header`, `msgtype`, `msgelemslen`, `cisco-fingerprint`, or `all` / 字段锁定模式：要冻结的区域 |
+
+---
+
+## Field-lock mode / 字段锁定模式
+
+Opt-in (`--lock-fields`, default off). Freezes the byte regions you name and
+confines every round to **one equal-length overwrite inside a single mutable
+span**, so packet length, element count/order and every declared `Length` are
+preserved. Replies that still arrive can therefore be attributed to element
+content rather than to a broken frame — which is what makes the mode useful
+against a WLC that silently drops request frames it does not recognise.
+
+The 8-byte CAPWAP base header and every element TLV header stay fixed in this
+version: rewriting `Hlen`/`M` would move where the Control Header and elements
+are parsed from (the packet stops being parseable rather than mis-parsing), and
+rewriting an element `Length` would break the structure-preservation contract.
+Length-changing, insert, drop, reorder and element-`Type` modes are planned
+separately so that one variable changes at a time.
+
+| Token | Freezes |
+|---|---|
+| `capwap-header` | CAPWAP optional-field region (the Radio MAC field of a Cisco seed) |
+| `msgtype` | Control Header `MsgType` |
+| `msgelemslen` | Control Header `MsgElemsLen` |
+| `cisco-fingerprint` | value bytes of the Cisco identity elements (Types 20/38/39/45/28 and both Type 37 VSPs) |
+| `all` | all of the above |
+
+Tokens name what is **frozen**, so omitting `cisco-fingerprint` releases the
+identity bytes as well, including the VSP vendor ID — that is intentional (it is
+what a fingerprint-ablation experiment varies) but it is not the conservative
+set. Each round is labelled `locked_equal_length_value:<span>` in
+`method_chain`, and the active token set is recorded in `session.json` as
+`lock_fields`.
+
+```bash
+# Conservative: framing + Cisco identity frozen; only non-identity element values move
+python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco \
+    --rounds 200 --seed 424242 --lock-fields all
+
+# Release the identity bytes too (fingerprint-ablation style)
+python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco \
+    --rounds 200 --seed 424242 --lock-fields capwap-header,msgtype,msgelemslen
+```
 
 ---
 
@@ -167,6 +213,8 @@ base_pkt ──► [structured mutations]* ──► [byte-level mutations]* ─
 **Stage 1 — Structured mutations**: selected by `random.choices` (repetition allowed), sorted by layer dependency order.
 
 **Stage 2 — Byte-level mutations**: 75% of rounds include ≥1 byte-level mutation; `brutal_shuffle_bytes` is always the final step.
+
+**Locked mode replaces both stages**: when `--lock-fields` is given, the round performs a single equal-length overwrite inside one mutable span (see [Field-lock mode](#field-lock-mode--字段锁定模式)) and neither pool runs, so a byte-level method cannot undo a frozen region.
 
 ---
 

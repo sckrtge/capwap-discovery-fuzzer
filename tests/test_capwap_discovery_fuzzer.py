@@ -14,13 +14,21 @@ Covers the defects verified on 2026-09-10:
 - /proc/<pid>/stat parsing with spaces in the process name
 """
 
+import json
 import random
+import socket
+import struct
+import threading
 from pathlib import Path
 
 import pytest
 from scapy.packet import Packet
+from typer.testing import CliRunner
 
+from capwap_discovery_fuzzer import lock_fuzzer
 from capwap_discovery_fuzzer.capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
+from capwap_discovery_fuzzer.cli import app
+from capwap_discovery_fuzzer.lock_fuzzer import parse_lock_fields
 from capwap_discovery_fuzzer.payload_fuzzer import Payload_Fuzzer
 from capwap_discovery_fuzzer.request_creater import (
     CAPWAP_Header,
@@ -30,6 +38,7 @@ from capwap_discovery_fuzzer.request_creater import (
 )
 from capwap_discovery_fuzzer.response_parser import ResponseParser
 from capwap_discovery_fuzzer.vendors.cisco.creator import CiscoPayloadCreator
+from capwap_discovery_fuzzer.vendors.cisco.fuzzer import CiscoCAPWAPDiscoveryFuzzer
 from capwap_discovery_fuzzer.vendors.opencapwap.fuzzer import _parse_stat_cpu_times
 
 def _locate_pcap() -> Path:
@@ -178,3 +187,265 @@ def test_parse_stat_cpu_times_with_spaced_comm():
 
 def test_parse_stat_cpu_times_malformed_returns_none():
     assert _parse_stat_cpu_times("garbage") is None
+
+
+# ---------------------------------------------------------------- lock mode
+
+ALL_TOKENS = {"capwap-header", "msgtype", "msgelemslen", "cisco-fingerprint"}
+
+
+def test_parse_lock_fields_off_by_default():
+    assert parse_lock_fields(None) is None
+
+
+def test_parse_lock_fields_all_expands():
+    assert parse_lock_fields("all") == ALL_TOKENS
+
+
+def test_parse_lock_fields_tolerates_case_and_spaces():
+    assert parse_lock_fields(" MsgType , CISCO-FINGERPRINT ") == {
+        "msgtype", "cisco-fingerprint"
+    }
+
+
+@pytest.mark.parametrize("value", ["", "  ", "msgtype,bogus", "msgelemslenn"])
+def test_parse_lock_fields_rejects_bad_input(value):
+    with pytest.raises(ValueError):
+        parse_lock_fields(value)
+
+
+def test_lock_layout_matches_cisco_seed(cisco_base):
+    raw = bytes(cisco_base)
+    layout = lock_fuzzer.parse_layout(raw)
+
+    assert layout.header_end == 16          # Hlen=4: 16-byte header incl. Radio MAC
+    assert layout.ctrl_off == 16
+    # The seed's own MsgElemsLen counts MsgElemsLen(2)+Flags(1)+elements (RFC 5415).
+    assert struct.unpack_from(">H", raw, layout.ctrl_off + 5)[0] == 231
+    assert [e.type for e in layout.elements] == [
+        20, 38, 39, 41, 44, 45, 28, 1048, 1048, 37, 37
+    ]
+    # Element region = 231 - 3 = 228 bytes = 11 TLV headers (4B each) + 184 value bytes.
+    tlv_bytes = 4 * len(layout.elements)
+    assert sum(lock_fuzzer.len_elem(e) for e in layout.elements) == len(raw) - 24 - tlv_bytes
+    assert len(raw) - 24 - tlv_bytes == 184
+
+
+def test_lock_frozen_framing_is_byte_identical(cisco_base):
+    raw = bytes(cisco_base)
+    layout = lock_fuzzer.parse_layout(raw)
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+    mutated, label = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(7))
+
+    assert len(mutated) == len(raw)                     # equal length
+    assert mutated[:layout.header_end] == raw[:layout.header_end]
+    assert mutated[layout.ctrl_off:layout.ctrl_off + 4] == raw[layout.ctrl_off:layout.ctrl_off + 4]
+    assert mutated[layout.ctrl_off + 5:layout.ctrl_off + 7] == raw[layout.ctrl_off + 5:layout.ctrl_off + 7]
+    assert mutated != raw                               # the edit did happen
+    assert label.startswith("locked_equal_length_value:value-type")
+
+
+def test_lock_conservative_set_leaves_only_non_fingerprint_values(cisco_base):
+    raw = bytes(cisco_base)
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+
+    assert sorted(s.label for s in spans) == [
+        "value-type1048", "value-type1048", "value-type41", "value-type44"
+    ]
+    assert sum(len(s) for s in spans) == 12
+
+
+def test_lock_releasing_fingerprint_opens_every_element_value(cisco_base):
+    raw = bytes(cisco_base)
+    spans = lock_fuzzer.mutable_spans(raw, {"capwap-header", "msgtype", "msgelemslen"})
+
+    assert len(spans) == 11
+    # Only element *value* bytes are mutable in v1, so the 11 four-byte TLV
+    # headers are excluded: 228 - 44 = 184.
+    assert sum(len(s) for s in spans) == len(raw) - 24 - 4 * 11
+
+
+def test_lock_fingerprint_values_untouched(cisco_base):
+    raw = bytes(cisco_base)
+    layout = lock_fuzzer.parse_layout(raw)
+    base_values = {e.header_start: raw[e.value_start:e.value_end] for e in layout.elements}
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+
+    for seed in range(25):
+        mutated, _ = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(seed))
+        for e in layout.elements:
+            if e.type in lock_fuzzer.CISCO_FINGERPRINT_TYPES:
+                assert mutated[e.value_start:e.value_end] == base_values[e.header_start]
+
+
+def test_lock_mutation_stays_inside_a_mutable_span(cisco_base):
+    raw = bytes(cisco_base)
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+    mutable_bytes = {i for s in spans for i in range(s.start, s.end)}
+
+    # A one-byte span can legitimately draw its original value back (1/256), so
+    # assert on the union across seeds instead of requiring every round to differ.
+    all_changed: set[int] = set()
+    for seed in range(25):
+        mutated, _ = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(seed))
+        all_changed |= {i for i, (a, b) in enumerate(zip(raw, mutated)) if a != b}
+
+    assert all_changed, "locked mode never changed a byte across 25 seeds"
+    assert all_changed <= mutable_bytes
+
+
+def test_lock_element_headers_and_lengths_untouched(cisco_base):
+    raw = bytes(cisco_base)
+    layout = lock_fuzzer.parse_layout(raw)
+    spans = lock_fuzzer.mutable_spans(raw, {"msgtype", "msgelemslen"})
+
+    mutated, _ = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(3))
+    for e in layout.elements:
+        # TLV header (Type/Length) must survive; only Value bytes may change.
+        assert mutated[e.header_start:e.value_start] == raw[e.header_start:e.value_start]
+    # Element count/order and every declared Length are unchanged by construction.
+    assert lock_fuzzer.parse_layout(mutated).elements == layout.elements
+
+
+def test_lock_same_seed_reproduces_bytes_and_label(cisco_base):
+    raw = bytes(cisco_base)
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+
+    first = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(4242))
+    second = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(4242))
+    third = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(4243))
+
+    assert first == second
+    assert first[1] == second[1]
+    assert first != third
+
+
+def test_lock_without_mutable_span_returns_seed():
+    # Framing frozen and the only element is a fingerprint type: nothing may move.
+    raw = bytes(CAPWAP_Header(version=0, Hlen=2, WBID=1)
+                / Control_Header(MsgType=1, SeqNum=0, MsgElemsLen=4, Flags=0)
+                / MessageElement(Type=20, Length=1, Value=b"\x01"))
+    spans = lock_fuzzer.mutable_spans(raw, ALL_TOKENS)
+
+    assert spans == []
+    mutated, label = lock_fuzzer.mutate_equal_length(raw, spans, random.Random(1))
+    assert mutated == raw
+    assert label == "locked_equal_length_value:none"
+
+
+def test_lock_mode_off_keeps_original_pools(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)          # keep the session's capwap_log/ out of the repo
+    fuzzer = CAPWAPDiscoveryFuzzer(ac_ip="127.0.0.1", seed=1)
+    assert fuzzer.lock_fields is None
+
+
+def test_cli_rejects_unknown_lock_token():
+    result = CliRunner().invoke(
+        app, ["--ac-ip", "127.0.0.1", "--lock-fields", "msgtype,nonsense"]
+    )
+    assert result.exit_code != 0
+    assert "nonsense" in result.output
+
+
+# ------------------------------------------------- lock mode, end to end
+
+def _start_responder():
+    """Local UDP responder so the fuzzing path can run without a real AC."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        sock.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                _, peer = sock.recvfrom(65535)
+            except OSError:
+                continue
+            sock.sendto(b"\x00" * 8, peer)   # shape irrelevant; only requests are inspected
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return sock, port, stop, thread
+
+
+def test_lock_end_to_end_requests_satisfy_invariants(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sock, port, stop, thread = _start_responder()
+    try:
+        fuzzer = CiscoCAPWAPDiscoveryFuzzer(
+            ac_ip="127.0.0.1", ac_port=port, timeout=0.3, seed=7,
+            lock_fields=ALL_TOKENS,
+        )
+        for i in range(20):
+            fuzzer.fuzzing(round_number=i + 1)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        sock.close()
+
+    seed = bytes(CiscoPayloadCreator().create_discovery_request(valid=True))
+    layout = lock_fuzzer.parse_layout(seed)
+    records = [json.loads(line) for line in fuzzer.records_path.read_text().splitlines()]
+    assert len(records) == 20
+
+    mutated_something = False
+    for record in records:
+        data = bytes.fromhex(record["request_hex"])
+        assert len(data) == len(seed)                       # 等长
+        assert data[:layout.header_end] == seed[:layout.header_end]
+        assert data[layout.ctrl_off:layout.ctrl_off + 4] == seed[layout.ctrl_off:layout.ctrl_off + 4]
+        assert data[layout.ctrl_off + 5:layout.ctrl_off + 7] == seed[layout.ctrl_off + 5:layout.ctrl_off + 7]
+        for elem in layout.elements:
+            if elem.type in lock_fuzzer.CISCO_FINGERPRINT_TYPES:
+                assert data[elem.value_start:elem.value_end] == seed[elem.value_start:elem.value_end]
+        assert record["method_chain"][0].startswith("locked_equal_length_value:")
+        mutated_something |= data != seed
+
+    assert mutated_something, "locked mode never changed a packet in 20 rounds"
+
+
+def test_unlocked_end_to_end_uses_original_pool(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sock, port, stop, thread = _start_responder()
+    try:
+        fuzzer = CiscoCAPWAPDiscoveryFuzzer(
+            ac_ip="127.0.0.1", ac_port=port, timeout=0.3, seed=7,
+        )
+        for i in range(10):
+            fuzzer.fuzzing(round_number=i + 1)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        sock.close()
+
+    records = [json.loads(line) for line in fuzzer.records_path.read_text().splitlines()]
+    assert len(records) == 10
+    for record in records:
+        assert record["method_chain"]
+        # Without --lock-fields the general safe/brutal pools must still be used.
+        assert not any(m.startswith("locked_") for m in record["method_chain"])
+
+
+def test_cli_records_lock_fields_in_session_json(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sock, port, stop, thread = _start_responder()
+    try:
+        result = CliRunner().invoke(app, [
+            "--ac-ip", "127.0.0.1", "--ac-port", str(port),
+            "--vendor", "cisco", "--rounds", "2", "--sleep", "0",
+            "--lock-fields", "all",
+        ])
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        sock.close()
+
+    assert result.exit_code == 0, result.output
+    session_files = list(tmp_path.glob("capwap_log/*/session.json"))
+    assert len(session_files) == 1
+    session = json.loads(session_files[0].read_text())
+    assert session["lock_fields"] == sorted(ALL_TOKENS)
+
+

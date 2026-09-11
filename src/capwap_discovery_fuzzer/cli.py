@@ -11,6 +11,7 @@ from datetime import datetime
 
 from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from .errors import CrashDetectedError
+from .lock_fuzzer import parse_lock_fields
 from .vendors import get_vendor, DEFAULT_VENDOR
 from .vendors.opencapwap.fuzzer import OpenCAPWAPFuzzer
 
@@ -97,6 +98,16 @@ def fuzz(
             'In continue mode, 3 consecutive probe failures trigger a definitive crash stop.'
         )
     ),
+    lock_fields: str | None = typer.Option(
+        None,
+        '--lock-fields',
+        help=(
+            'Enable locked mutation mode (default: off). Comma-separated tokens name the '
+            'regions to FREEZE: capwap-header, msgtype, msgelemslen, cisco-fingerprint, '
+            'or "all". Each round then makes one equal-length overwrite inside a mutable '
+            'span only, preserving packet length and element structure.'
+        )
+    ),
     vendor: str = typer.Option(
         DEFAULT_VENDOR,
         '--vendor',
@@ -115,6 +126,11 @@ def fuzz(
     if on_probe_fail not in ("continue", "stop"):
         raise typer.BadParameter("--on-probe-fail must be 'continue' or 'stop'")
 
+    try:
+        lock_set = parse_lock_fields(lock_fields)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
+
     if seed is None:
         seed = int(time.time_ns())
 
@@ -123,7 +139,7 @@ def fuzz(
     if fuzzer_cls is None:
         supported = "opencapwap, cisco, generic"
         raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: {supported}")
-    fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface)
+    fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface, lock_fields=lock_set)
 
     # 统一配置 logging，写入 fuzzer 的 log 目录。
     # 必须先清除 root logger 上已有的 handlers（fuzzer __init__ 内的 logging 调用
@@ -150,6 +166,7 @@ def fuzz(
         "probe_interval": probe_interval,
         "pcap": pcap_path,
         "replay_jsonl": str(replay_jsonl) if replay_jsonl else None,
+        "lock_fields": sorted(lock_set) if lock_set else None,
     })
 
     console.rule("[bold blue]CAPWAP Discovery Fuzzing[/bold blue]")
@@ -162,6 +179,11 @@ def fuzz(
     console.print(f"[+] Target    : {target}")
     console.print(f"[+] Rounds    : {rounds}")
     console.print(f"[*] Seed      : {seed}")
+    if lock_set:
+        console.print(
+            f"[+] Lock      : {', '.join(sorted(lock_set))} "
+            f"(equal-length value mutation only)"
+        )
     console.print(f"[+] Log dir   : {fuzzer.log_dir}")
 
     if pcap_path:

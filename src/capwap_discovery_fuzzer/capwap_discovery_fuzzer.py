@@ -13,6 +13,7 @@ from .response_parser import ResponseParser
 from . import lock_fuzzer
 from . import monitor
 from . import conformance
+from . import weights
 from .errors import *
 
 MUTATION_COUNT = 1  # 每轮发送报文条数
@@ -21,7 +22,10 @@ class CAPWAPDiscoveryFuzzer:
     def __init__(self, ac_ip: str | None, ac_port: int = 5246, timeout: float = 3.0,
                  seed: int | None = None, broadcast: bool = False, iface: str = 'lo',
                  lock_fields: set[str] | None = None,
-                 monitor_config: monitor.MonitorConfig | None = None):
+                 monitor_config: monitor.MonitorConfig | None = None,
+                 adaptive_weights: bool = False,
+                 adapt_floor: float = weights.DEFAULT_FLOOR,
+                 adapt_reward: str = weights.REWARD_RESPONSE):
         self.ac_ip = ac_ip
         self.ac_port = ac_port
         self.timeout = timeout
@@ -38,6 +42,15 @@ class CAPWAPDiscoveryFuzzer:
         # 灰盒监控（默认关闭）由本进程自己持有，采样与轮次共用同一时钟与日志。
         self.monitor_config = monitor_config
         self._monitor: monitor.C9800Monitor | None = None
+        # Adaptive scheduling (F, opt-in).  Off by default: with it off the
+        # mutation draw is the original uniform random choice and --seed still
+        # reproduces bytes exactly.
+        # 自适应调度（F，默认关闭）：关闭时仍是原来的均匀随机抽取，--seed 逐字节可复现。
+        self.adaptive_weights = adaptive_weights
+        self.adapt_floor = adapt_floor
+        self.adapt_reward = adapt_reward
+        self._scheduler: weights.WeightScheduler | None = None
+        self._attributed_rounds = 0
         # Shared round counter: fuzzing() writes it, the monitor thread reads it
         # so every sample can be attributed to the rounds it spans.
         # 共享轮次计数器：fuzzing() 写入，监控线程读取，用于把采样归因到轮次。
@@ -49,6 +62,7 @@ class CAPWAPDiscoveryFuzzer:
         self.log_dir = Path("./capwap_log") / timestamp
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.records_path = self.log_dir / "records.jsonl"
+        self._weights_path = self.log_dir / "weights.jsonl"
 
         logging.info(f"CAPWAP Fuzzer initialized with seed {self.seed}, log_dir={self.log_dir}")
 
@@ -267,6 +281,61 @@ class CAPWAPDiscoveryFuzzer:
             return None
         return lambda: monitor.ParamikoSSHSession(self.monitor_config)
 
+    # -------------------- 自适应权重调度（F，可选） --------------------
+    def _scheduler_for(self, units: tuple[str, ...]) -> weights.WeightScheduler:
+        """Lazily create (and extend) the session-level scheduler.
+
+        Units are stable within a session, but extending defensively means a
+        changing span set can never raise mid-run.
+        """
+        if self._scheduler is None:
+            self._scheduler = weights.WeightScheduler(list(units), floor=self.adapt_floor)
+            return self._scheduler
+        for unit in units:
+            if unit not in self._scheduler.stats:
+                self._scheduler.units = self._scheduler.units + (unit,)
+                self._scheduler.stats[unit] = weights.UnitStats()
+        return self._scheduler
+
+    def _apply_scheduled_unit(self, unit: str, base_pkt, safe_map: dict, brutal_map: dict,
+                              raw: bytes | None, span_map: dict):
+        """Apply exactly one scheduled unit, so the outcome is attributable to it."""
+        if self.lock_fields is not None:
+            mutated = lock_fuzzer.mutate_span_equal_length(raw, span_map[unit], self._rng)
+            return Raw(mutated), [unit]
+        method = safe_map.get(unit) or brutal_map[unit]
+        return method(base_pkt.copy()), [unit]
+
+    def _write_weight_trace(self, round_number, unit: str, probability: float,
+                            response_type: str, reward: bool) -> None:
+        line = {
+            "round": round_number,
+            "unit": unit,
+            "probability": round(probability, 4),
+            "response_type": response_type,
+            "reward": reward,
+            "uses": self._scheduler.stats[unit].uses,
+            "successes": self._scheduler.stats[unit].successes,
+            "success_rate": round(self._scheduler.stats[unit].rate, 4),
+        }
+        try:
+            with open(self._weights_path, "a") as f:
+                f.write(json.dumps(line) + "\n")
+        except OSError as exc:
+            logging.warning("failed to write weights trace: %s", exc)
+
+    def adaptive_summary(self) -> dict | None:
+        if self._scheduler is None:
+            return None
+        return {
+            "enabled": True,
+            "reward": self.adapt_reward,
+            "floor": self.adapt_floor,
+            "attribution": "single_unit",
+            "attributed_rounds": self._attributed_rounds,
+            "units": self._scheduler.snapshot(),
+        }
+
     # -------------------- Fuzzing --------------------
     def fuzzing(self, pcap_path: str | None = None, max_safe_methods: int = 3,
                 max_brutal_methods: int = 3, round_number: int | None = None):
@@ -361,18 +430,38 @@ class CAPWAPDiscoveryFuzzer:
                 return 5
 
         for i in range(MUTATION_COUNT):
-            if self.lock_fields is not None:
+            # Candidate units for this round, and the raw bytes the lock mode
+            # would work on.  Computing them once keeps the adaptive and the
+            # original paths consistent.
+            lock_raw = bytes(base_pkt) if self.lock_fields is not None else None
+            lock_spans = (lock_fuzzer.mutable_spans(lock_raw, self.lock_fields)
+                          if self.lock_fields is not None else [])
+            span_map = {f"locked_equal_length_value:{s.label}": s for s in lock_spans}
+            safe_map = {getattr(m, "__name__", str(m)): m for m in safe_methods}
+            brutal_map = {getattr(m, "__name__", str(m)): m for m in brutal_methods}
+            unit_names = (list(span_map) if self.lock_fields is not None
+                          else list(safe_map) + list(brutal_map))
+
+            scheduled_unit = None
+            scheduled_prob = 0.0
+
+            if self.adaptive_weights and unit_names:
+                # Adaptive mode: exactly one unit per round (F).  Chaining several
+                # mutations would make the outcome unattributable.
+                scheduler = self._scheduler_for(tuple(unit_names))
+                scheduled_unit, scheduled_prob = scheduler.choose(self._rng)
+                pkt, method_chain = self._apply_scheduled_unit(
+                    scheduled_unit, base_pkt, safe_map, brutal_map, lock_raw, span_map)
+            elif self.lock_fields is not None:
                 # Locked mode: one equal-length edit inside one mutable span.
                 # 锁定模式：在单一可变异区间内做一次等长覆写。
-                raw = bytes(base_pkt)
-                spans = lock_fuzzer.mutable_spans(raw, self.lock_fields)
-                if not spans:
+                if not lock_spans:
                     logging.warning(
                         "Locked mode: no mutable span for this base packet "
                         "(freeze=%s); the seed is sent unmutated",
                         sorted(self.lock_fields),
                     )
-                mutated, label = lock_fuzzer.mutate_equal_length(raw, spans, self._rng)
+                mutated, label = lock_fuzzer.mutate_equal_length(lock_raw, lock_spans, self._rng)
                 pkt = Raw(mutated)
                 method_chain = [label]
             else:
@@ -419,6 +508,14 @@ class CAPWAPDiscoveryFuzzer:
                     status["error_types"].setdefault(error_type, 0)
                     status["error_types"][error_type] += 1
                 status["total"] += 1
+
+                # Credit the single scheduled unit with this round's outcome (F).
+                if self.adaptive_weights and scheduled_unit is not None:
+                    reward = weights.reward_for(resp_type, self.adapt_reward)
+                    self._scheduler.record(scheduled_unit, reward)
+                    self._attributed_rounds += 1
+                    self._write_weight_trace(iteration, scheduled_unit, scheduled_prob,
+                                             resp_type, reward)
             except Exception as e:
                 logging.error(f"Composite Fuzz iteration {i + 1} failed: {e}")
                 status["error"] += 1
@@ -580,6 +677,12 @@ class CAPWAPDiscoveryFuzzer:
                 conf["by_violation"][key] = conf["by_violation"].get(key, 0) + 1
         if conf["rounds"]:
             summary["rfc_conformance"] = conf
+
+        # Adaptive scheduling report (F): final weights plus how much of the run
+        # actually produced an attributed sample.
+        adaptive = self.adaptive_summary()
+        if adaptive is not None:
+            summary["adaptive_weights"] = adaptive
 
         # Response time stats
         if elapsed_list:

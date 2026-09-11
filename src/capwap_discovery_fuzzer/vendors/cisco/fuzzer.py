@@ -9,7 +9,9 @@ class CiscoCAPWAPDiscoveryFuzzer(CAPWAPDiscoveryFuzzer):
     """Fuzzer variant for Cisco C9800 WLC.
 
     Overrides __init__ to swap in:
-    - CiscoPayloadCreator: builds C9800-compatible Discovery Requests
+    - CiscoPayloadCreator: builds C9800-compatible Discovery Requests, optionally
+      from a caller-supplied ApIdentity (E/3a — varies the claimed AP without
+      changing code; the default identity reproduces the capture byte for byte)
     - CiscoResponseParser: accepts MsgType=2 and MsgType=20 as valid,
       extracts Cisco VSP fields
 
@@ -17,7 +19,8 @@ class CiscoCAPWAPDiscoveryFuzzer(CAPWAPDiscoveryFuzzer):
     inherited from CAPWAPDiscoveryFuzzer unchanged.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, identity=None, **kwargs):
         super().__init__(**kwargs)
-        self.payload_creator = CiscoPayloadCreator(rng=self._rng)
+        self.identity = identity
+        self.payload_creator = CiscoPayloadCreator(rng=self._rng, identity=identity)
         self.response_parser = CiscoResponseParser()

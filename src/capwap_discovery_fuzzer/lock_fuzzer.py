@@ -196,6 +196,20 @@ def mutable_spans(raw: bytes, freeze: set[str]) -> list[Span]:
     return [c for c in candidates if not _overlaps(c, frozen)]
 
 
+def mutate_span_equal_length(raw: bytes, span: Span, rng: random.Random) -> bytes:
+    """Equal-length overwrite of up to MAX_MUTATION_BYTES inside one named span.
+
+    Split out from :func:`mutate_equal_length` so a caller that has already
+    chosen the span (the adaptive scheduler in F) can mutate exactly that one.
+    """
+    count = rng.randint(1, min(len(span), MAX_MUTATION_BYTES))
+    start = rng.randint(span.start, span.end - count)
+    out = bytearray(raw)
+    for i in range(start, start + count):
+        out[i] = rng.getrandbits(8)
+    return bytes(out)
+
+
 def mutate_equal_length(raw: bytes, spans: list[Span], rng: random.Random) -> tuple[bytes, str]:
     """Overwrite up to ``MAX_MUTATION_BYTES`` random bytes inside one span.
 
@@ -208,10 +222,4 @@ def mutate_equal_length(raw: bytes, spans: list[Span], rng: random.Random) -> tu
         return bytes(raw), "locked_equal_length_value:none"
 
     span = rng.choice(spans)
-    count = rng.randint(1, min(len(span), MAX_MUTATION_BYTES))
-    start = rng.randint(span.start, span.end - count)
-
-    out = bytearray(raw)
-    for i in range(start, start + count):
-        out[i] = rng.getrandbits(8)
-    return bytes(out), f"locked_equal_length_value:{span.label}"
+    return mutate_span_equal_length(raw, span, rng), f"locked_equal_length_value:{span.label}"

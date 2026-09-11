@@ -294,6 +294,25 @@ def _check_radio_information(value: bytes, report: Report) -> None:
             f"Radio Type 0x{radio_type:08x} sets no PHY bit (B/A/G/N) (RFC 5416 §6.25)")
 
 
+def _check_wtp_descriptor(value: bytes, report: Report) -> None:
+    """RFC 5415 §4.6.41: Length >= 33 and Num Encrypt in 1..255.
+
+    The section also requires the element to contain at least one Encryption
+    sub-element, which is what the Num Encrypt lower bound expresses.  The Cisco
+    seed inherited Num Encrypt = 0 from a real AP capture, so this rule fires on
+    our own request too - reported rather than tolerated.
+    """
+    if len(value) < 33:
+        report.violations.append(
+            f"WTP Descriptor length {len(value)} < 33 (RFC 5415 §4.6.41)")
+        return
+    num_encrypt = value[2]
+    if not 1 <= num_encrypt <= 255:
+        report.violations.append(
+            f"WTP Descriptor Num Encrypt {num_encrypt} outside 1..255 "
+            f"(RFC 5415 §4.6.41)")
+
+
 def _check_result_code(value: bytes, report: Report) -> None:
     if len(value) != 4:
         report.violations.append(
@@ -354,6 +373,8 @@ def check_message(raw: bytes) -> Report:
 
     for value in values.get(ELEM_AC_DESCRIPTOR, []):
         _check_ac_descriptor(value, report)
+    for value in values.get(ELEM_WTP_DESCRIPTOR, []):
+        _check_wtp_descriptor(value, report)
     for value in values.get(ELEM_IEEE80211_WTP_RADIO_INFO, []):
         _check_radio_information(value, report)
     for value in values.get(ELEM_RESULT_CODE, []):

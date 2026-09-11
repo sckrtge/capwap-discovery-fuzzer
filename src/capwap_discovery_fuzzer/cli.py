@@ -13,12 +13,100 @@ from .capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from .errors import CrashDetectedError
 from . import forensics
 from . import monitor
+from . import weights
 from .lock_fuzzer import parse_lock_fields
 from .vendors import get_vendor, DEFAULT_VENDOR
 from .vendors.opencapwap.fuzzer import OpenCAPWAPFuzzer
 
 app = typer.Typer()
 console = Console()
+
+
+def _parse_hex_bytes(value: str, option: str, expect_len: int | None = None) -> bytes:
+    """Parse a hex string (colons/dashes allowed), e.g. an AP MAC."""
+    cleaned = value.replace(":", "").replace("-", "").replace(" ", "")
+    try:
+        raw = bytes.fromhex(cleaned)
+    except ValueError:
+        raise typer.BadParameter(f"{option} must be hex digits, got {value!r}")
+    if expect_len is not None and len(raw) != expect_len:
+        raise typer.BadParameter(
+            f"{option} must be {expect_len} bytes ({expect_len * 2} hex digits), got {len(raw)}")
+    return raw
+
+
+def _parse_int_list(value: str, option: str) -> list[int]:
+    out: list[int] = []
+    for chunk in value.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            out.append(int(chunk, 0))
+        except ValueError:
+            raise typer.BadParameter(f"{option} must be a comma-separated integer list, got {value!r}")
+    if not out:
+        raise typer.BadParameter(f"{option} was given but contains no value")
+    return out
+
+
+def _build_identity(values: dict):
+    """Turn the seed-identity CLI options into an ApIdentity (E/3a).
+
+    Unset options keep the captured defaults, so the default run stays
+    byte-identical to previous sessions (asserted in tests/test_identity.py).
+    """
+    from dataclasses import replace
+
+    from .vendors.cisco.creator import ApIdentity
+
+    kwargs: dict = {}
+    if values["--ap-name"] is not None:
+        kwargs["ap_name"] = values["--ap-name"].encode()
+    if values["--ap-mac"] is not None:
+        kwargs["ap_mac"] = _parse_hex_bytes(values["--ap-mac"], "--ap-mac", expect_len=6)
+    if values["--ap-model"] is not None:
+        kwargs["model"] = values["--ap-model"].encode()
+    if values["--ap-serial"] is not None:
+        kwargs["serial"] = values["--ap-serial"].encode()
+    if values["--ap-base-mac"] is not None:
+        kwargs["base_mac"] = _parse_hex_bytes(values["--ap-base-mac"], "--ap-base-mac", expect_len=6)
+    if values["--ap-radio-ids"] is not None:
+        ids = _parse_int_list(values["--ap-radio-ids"], "--ap-radio-ids")
+        captured_types = (0x01, 0x02)   # from the capture, in order
+        kwargs["radios"] = tuple(
+            (rid, captured_types[i] if i < len(captured_types) else 0x0E)
+            for i, rid in enumerate(ids)
+        )
+        kwargs["max_radios"] = len(ids)
+        kwargs["radios_in_use"] = len(ids)
+    if values["--num-encrypt"] is not None:
+        kwargs["num_encrypt"] = values["--num-encrypt"]
+    if values["--msg-type"] is not None:
+        kwargs["msg_type"] = values["--msg-type"]
+    if values["--omit-element"] is not None:
+        kwargs["omit_elements"] = frozenset(
+            _parse_int_list(values["--omit-element"], "--omit-element"))
+    return replace(ApIdentity(), **kwargs)
+
+
+def _describe_identity(identity) -> dict | None:
+    """Serialise the seed identity for session.json (no secrets involved)."""
+    if identity is None:
+        return None
+    return {
+        "ap_name": identity.ap_name.decode(errors="replace"),
+        "ap_mac": identity.ap_mac.hex(),
+        "model": identity.model.decode(errors="replace"),
+        "serial": identity.serial.decode(errors="replace"),
+        "base_mac": identity.base_mac.hex(),
+        "radios": [list(r) for r in identity.radios],
+        "max_radios": identity.max_radios,
+        "radios_in_use": identity.radios_in_use,
+        "num_encrypt": identity.num_encrypt,
+        "msg_type": identity.msg_type,
+        "omit_elements": sorted(identity.omit_elements),
+    }
 
 
 def _collect_forensics(fuzzer, reason: str, round_number, status: dict, probe: dict,
@@ -174,6 +262,73 @@ def fuzz(
             'diagnostics under a deadline. Device pull needs --monitor-host for credentials.'
         )
     ),
+    ap_name: str | None = typer.Option(
+        None,
+        '--ap-name',
+        help='Override the AP name the seed claims (element 45 and VSP-5). --vendor cisco only.'
+    ),
+    ap_mac: str | None = typer.Option(
+        None,
+        '--ap-mac',
+        help='Override the Radio MAC in the CAPWAP optional field, 12 hex digits. --vendor cisco only.'
+    ),
+    ap_model: str | None = typer.Option(
+        None,
+        '--ap-model',
+        help='Override the model string in WTP Board Data sub-element 0. --vendor cisco only.'
+    ),
+    ap_serial: str | None = typer.Option(
+        None,
+        '--ap-serial',
+        help='Override the serial in WTP Board Data sub-element 1. --vendor cisco only.'
+    ),
+    ap_base_mac: str | None = typer.Option(
+        None,
+        '--ap-base-mac',
+        help='Override the base radio MAC in WTP Board Data sub-element 4, 12 hex digits. --vendor cisco only.'
+    ),
+    ap_radio_ids: str | None = typer.Option(
+        None,
+        '--ap-radio-ids',
+        help=(
+            'Comma-separated Radio IDs for the Type 1048 elements (RFC 5416 §6.25 requires 1..31). '
+            'Default keeps the captured "0,1", which is non-conformant.'
+        )
+    ),
+    num_encrypt: int | None = typer.Option(
+        None,
+        '--num-encrypt',
+        help='WTP Descriptor Num Encrypt (RFC 5415 §4.6.41 requires 1..255). Default keeps the captured 0.'
+    ),
+    msg_type: int | None = typer.Option(
+        None,
+        '--msg-type',
+        help='Seed message type: 19 = Primary Discovery Request (default), 1 = Discovery Request (§5.1).'
+    ),
+    omit_element: str | None = typer.Option(
+        None,
+        '--omit-element',
+        help='Comma-separated element types to leave out of the seed, for presence/absence ablation.'
+    ),
+    adapt_weights: bool = typer.Option(
+        False,
+        '--adapt-weights/--no-adapt-weights',
+        help=(
+            'F: schedule mutations by observed outcomes instead of uniformly. Uses one unit per '
+            'round so every sample is attributable, and writes weights.jsonl. NOTE: this breaks '
+            '--seed byte-for-byte reproducibility by design.'
+        )
+    ),
+    adapt_floor: float = typer.Option(
+        0.10,
+        '--adapt-floor',
+        help='Minimum share of uniform probability kept for every unit (default 0.10).'
+    ),
+    adapt_reward: str = typer.Option(
+        'response',
+        '--adapt-reward',
+        help='"response" (any reply counts, the default) or "valid" (RFC-shaped reply only).'
+    ),
     lock_fields: str | None = typer.Option(
         None,
         '--lock-fields',
@@ -207,6 +362,12 @@ def fuzz(
     except ValueError as exc:
         raise typer.BadParameter(str(exc))
 
+    if adapt_reward not in (weights.REWARD_RESPONSE, weights.REWARD_VALID):
+        raise typer.BadParameter(
+            f"--adapt-reward must be '{weights.REWARD_RESPONSE}' or '{weights.REWARD_VALID}'")
+    if not 0.0 <= adapt_floor < 1.0:
+        raise typer.BadParameter("--adapt-floor must be in [0, 1)")
+
     monitor_config = None
     if monitor_host:
         if monitor_credential_file is None:
@@ -219,6 +380,22 @@ def fuzz(
             raw=monitor_raw,
         )
 
+    # -------------------- 种子身份参数化（E/3a，仅 Cisco）--------------------
+    identity = None
+    identity_overrides = {
+        "--ap-name": ap_name, "--ap-mac": ap_mac, "--ap-model": ap_model,
+        "--ap-serial": ap_serial, "--ap-base-mac": ap_base_mac,
+        "--ap-radio-ids": ap_radio_ids, "--num-encrypt": num_encrypt,
+        "--msg-type": msg_type, "--omit-element": omit_element,
+    }
+    if any(value is not None for value in identity_overrides.values()):
+        if vendor != "cisco":
+            raise typer.BadParameter(
+                "seed identity options (--ap-*, --num-encrypt, --msg-type, --omit-element) "
+                "only apply to --vendor cisco"
+            )
+        identity = _build_identity(identity_overrides)
+
     if seed is None:
         seed = int(time.time_ns())
 
@@ -227,7 +404,13 @@ def fuzz(
     if fuzzer_cls is None:
         supported = "opencapwap, cisco, generic"
         raise typer.BadParameter(f"Unknown vendor '{vendor}'. Supported: {supported}")
-    fuzzer = fuzzer_cls(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast, seed=seed, iface=iface, lock_fields=lock_set, monitor_config=monitor_config)
+    fuzzer_kwargs = dict(ac_ip=ac_ip, ac_port=ac_port, timeout=timeout, broadcast=broadcast,
+                         seed=seed, iface=iface, lock_fields=lock_set,
+                         monitor_config=monitor_config, adaptive_weights=adapt_weights,
+                         adapt_floor=adapt_floor, adapt_reward=adapt_reward)
+    if vendor == "cisco":
+        fuzzer_kwargs["identity"] = identity
+    fuzzer = fuzzer_cls(**fuzzer_kwargs)
 
     # 统一配置 logging，写入 fuzzer 的 log 目录。
     # 必须先清除 root logger 上已有的 handlers（fuzzer __init__ 内的 logging 调用
@@ -257,6 +440,11 @@ def fuzz(
         "lock_fields": sorted(lock_set) if lock_set else None,
         "monitor": monitor_config.public_dict() if monitor_config else None,
         "forensics": forensics_enabled,
+        "seed_identity": _describe_identity(identity),
+        "adaptive_weights": (
+            {"enabled": True, "floor": adapt_floor, "reward": adapt_reward,
+             "attribution": "single_unit"} if adapt_weights else None
+        ),
     })
 
     console.rule("[bold blue]CAPWAP Discovery Fuzzing[/bold blue]")
@@ -273,6 +461,11 @@ def fuzz(
         console.print(
             f"[+] Lock      : {', '.join(sorted(lock_set))} "
             f"(equal-length value mutation only)"
+        )
+    if adapt_weights:
+        console.print(
+            f"[+] Adapt     : reward={adapt_reward} floor={adapt_floor:g} "
+            f"(one unit per round; --seed reproducibility off)"
         )
     if monitor_config:
         console.print(

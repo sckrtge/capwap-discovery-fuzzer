@@ -110,11 +110,8 @@ class CiscoResponseParser(ResponseParser):
         try:
             self._bind_layers()
 
-            # Strip IP + UDP headers if present
+            # raw_data is the UDP payload from recvfrom() — no IP/UDP header present.
             data = raw_data
-            if data and data[0] >> 4 == 4:
-                ip_len = (data[0] & 0x0F) * 4
-                data = data[ip_len + 8:]
 
             # Parse with Scapy for structured result
             from capwap_discovery_fuzzer.request_creater import CAPWAP_Header, Control_Header

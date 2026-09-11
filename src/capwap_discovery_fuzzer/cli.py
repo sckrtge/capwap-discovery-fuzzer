@@ -188,6 +188,11 @@ def fuzz(
 
     # -------------------- Replay 模式 --------------------
     if replay_jsonl:
+        # Gray-box observability during replay (bug fix): start the process
+        # monitor so a target death mid-replay is captured in
+        # process_monitor.csv instead of replay silently exiting 0.
+        if isinstance(fuzzer, OpenCAPWAPFuzzer):
+            fuzzer.start_process_monitor()
         filter_fn = (lambda r: r.get("response_type") == replay_filter) if replay_filter else None
         console.print(f"[cyan][*] Replaying records from {replay_jsonl}...[/cyan]")
         results = fuzzer.replay_requests_from_jsonl(str(replay_jsonl), filter_fn=filter_fn)
@@ -198,6 +203,29 @@ def fuzz(
                 total_status["error_types"][error_type] += 1
             total_status["total"] += 1
         console.print(f"[green][+] Replayed {len(results)} records.[/green]")
+
+        # Bug fix: detect a target that died during replay (previously replay
+        # exited 0 with no crash artifacts even after killing the target).
+        if isinstance(fuzzer, OpenCAPWAPFuzzer):
+            fuzzer.stop_process_monitor()
+            if fuzzer.is_process_alive() is False:
+                crash_round = results[-1][0].get("round") if results else None
+                crash_report = {
+                    "crash_detected_at_round": crash_round,
+                    "context": "replay",
+                    "probe_attempts": 0,
+                    "ac_ip": ac_ip,
+                    "ac_port": ac_port,
+                    "timestamp": datetime.now().isoformat(),
+                    "total_status": total_status,
+                }
+                report_path = fuzzer.log_dir / "crash_report.json"
+                with open(report_path, "w") as f:
+                    json.dump(crash_report, f, indent=2, default=str)
+                console.print(f"[bold red][!] AC process died during replay — crash report saved to {report_path}[/bold red]")
+                fuzzer.write_crash_sequence(last_n=50)
+                fuzzer.write_summary(total_status, crash_at_round=crash_round)
+                sys.exit(2)
 
     # -------------------- Fuzzing 模式 --------------------
     else:
@@ -330,7 +358,7 @@ def fuzz(
                                     fuzzer.update_suspected_event_recovered(round_number=i)
                             consecutive_probe_failures = 0
 
-                    status = fuzzer.fuzzing(round_number=i + 1)
+                    status = fuzzer.fuzzing(pcap_path=pcap_path, round_number=i + 1)
                     for k in ("valid", "timeout", "error", "total"):
                         total_status[k] += status.get(k, 0)
                     for etype, count in status.get("error_types", {}).items():

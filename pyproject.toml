@@ -12,7 +12,7 @@ maintainers = [
 classifiers = [
     # TODO
 ]
-license = {text = "MIT"}
+license = {text = "GPL-2.0"}
 dependencies = [
   "typer",
   "scapy"
@@ -29,9 +29,9 @@ test = [
 ]
 
 [project.urls]
-bugs = "https://github.com/sckrt/capwap_discovery_fuzzer/issues"
-changelog = "https://github.com/sckrt/capwap_discovery_fuzzer/blob/master/changelog.md"
-homepage = "https://github.com/sckrt/capwap_discovery_fuzzer"
+bugs = "https://github.com/sckrtge/capwap-discovery-fuzzer/issues"
+changelog = "https://github.com/sckrtge/capwap-discovery-fuzzer/blob/main/changelog.md"
+homepage = "https://github.com/sckrtge/capwap-discovery-fuzzer"
 
 [project.scripts]
 capwap_discovery_fuzzer = "capwap_discovery_fuzzer.cli:app"

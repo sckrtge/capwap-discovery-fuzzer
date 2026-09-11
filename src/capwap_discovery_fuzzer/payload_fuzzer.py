@@ -1,12 +1,15 @@
 from capwap_discovery_fuzzer.request_creater import *
-from scapy.packet import Packet
+from scapy.packet import NoPayload, Packet
 from scapy.layers.inet import IP, UDP
 import random
 
 
 class Payload_Fuzzer:
-    def __init__(self, base_pkt: Packet):
+    def __init__(self, base_pkt: Packet, rng: random.Random | None = None):
         self.base = base_pkt
+        # Mutations draw from this seeded RNG so a given --seed reproduces the
+        # exact mutated bytes, not just the method chain (README contract).
+        self._rng = rng if rng is not None else random.Random()
 
     def _clone(self, pkt: Packet | None = None) -> Packet:
         """
@@ -25,17 +28,23 @@ class Payload_Fuzzer:
 
     def _iter_message_elements(self, pkt: Packet) -> list[Packet]:
         """
-        Walk the packet layer chain and collect all MessageElement layers.
-        遍历报文层链，收集所有 MessageElement 层，返回列表。
+        Walk the packet layer chain and collect all message-element layers.
+
+        Implemented as an explicit payload-chain walk: Scapy's getlayer(cls, nb)
+        counts matches starting at nb=1 (nb=0 never matched, which previously
+        made this always return an empty list and silently disabled every
+        fuzz_elem_* method), and its name-based matching also does not see the
+        MessageElement_Valid layers produced by parse_discovery_request().
+        Both classes expose the same Type/Length/Value fields.
+
+        遍历报文层链，收集所有消息元素层，返回列表。
         """
         elems = []
-        i = 0
-        while True:
-            elem = pkt.getlayer(MessageElement, i)
-            if elem is None:
-                break
-            elems.append(elem)
-            i += 1
+        cur = pkt
+        while cur is not None and not isinstance(cur, NoPayload):
+            if cur.__class__.__name__ in ("MessageElement", "MessageElement_Valid"):
+                elems.append(cur)
+            cur = cur.payload
         return elems
 
     # =====================================================================
@@ -55,9 +64,9 @@ class Payload_Fuzzer:
         hdr = p.getlayer("CAPWAP Header")
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
-        hdr.version = random.randint(0, 3)
-        hdr.Hlen = random.randint(0, 31)
-        hdr.FragmentOffset = random.randint(0, 0x1FFF)
+        hdr.version = self._rng.randint(0, 3)
+        hdr.Hlen = self._rng.randint(0, 31)
+        hdr.FragmentOffset = self._rng.randint(0, 0x1FFF)
         return p
 
     def fuzz_capwap_wbid(self, pkt: Packet | None = None) -> Packet:
@@ -74,7 +83,7 @@ class Payload_Fuzzer:
         hdr = p.getlayer("CAPWAP Header")
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
-        hdr.WBID = random.choice([0, 2, 3, 15, 31, random.randint(0, 31)])
+        hdr.WBID = self._rng.choice([0, 2, 3, 15, 31, self._rng.randint(0, 31)])
         return p
 
     def fuzz_capwap_flags(self, pkt: Packet | None = None) -> Packet:
@@ -95,25 +104,25 @@ class Payload_Fuzzer:
         hdr = p.getlayer("CAPWAP Header")
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
-        strategy = random.choice(["random", "invalid_combo", "all_set"])
+        strategy = self._rng.choice(["random", "invalid_combo", "all_set"])
         if strategy == "random":
-            hdr.T = random.randint(0, 1)
-            hdr.F = random.randint(0, 1)
-            hdr.L = random.randint(0, 1)
-            hdr.W = random.randint(0, 1)
-            hdr.M = random.randint(0, 1)
-            hdr.K = random.randint(0, 1)
-            hdr.Flags = random.randint(0, 7)
+            hdr.T = self._rng.randint(0, 1)
+            hdr.F = self._rng.randint(0, 1)
+            hdr.L = self._rng.randint(0, 1)
+            hdr.W = self._rng.randint(0, 1)
+            hdr.M = self._rng.randint(0, 1)
+            hdr.K = self._rng.randint(0, 1)
+            hdr.Flags = self._rng.randint(0, 7)
         elif strategy == "invalid_combo":
             # F=0 (not a fragment) but L=1 (last fragment) — contradictory
             # F=0（非分片包）却置 L=1（最后一片）—— 矛盾组合
             hdr.F = 0
             hdr.L = 1
-            hdr.T = random.randint(0, 1)
-            hdr.W = random.randint(0, 1)
-            hdr.M = random.randint(0, 1)
-            hdr.K = random.randint(0, 1)
-            hdr.Flags = random.randint(0, 7)
+            hdr.T = self._rng.randint(0, 1)
+            hdr.W = self._rng.randint(0, 1)
+            hdr.M = self._rng.randint(0, 1)
+            hdr.K = self._rng.randint(0, 1)
+            hdr.Flags = self._rng.randint(0, 7)
         elif strategy == "all_set":
             hdr.T = hdr.F = hdr.L = hdr.W = hdr.M = hdr.K = 1
             hdr.Flags = 7
@@ -134,9 +143,9 @@ class Payload_Fuzzer:
         if hdr is None:
             raise ValueError("CAPWAP header invalid!")
         hdr.F = 1
-        hdr.L = random.randint(0, 1)
-        hdr.FragmentID = random.randint(0, 0xFFFF)
-        hdr.FragmentOffset = random.randint(0, 0x1FFF)
+        hdr.L = self._rng.randint(0, 1)
+        hdr.FragmentID = self._rng.randint(0, 0xFFFF)
+        hdr.FragmentOffset = self._rng.randint(0, 0x1FFF)
         return p
 
     def fuzz_ctrl_msgtype(self, pkt: Packet | None = None) -> Packet:
@@ -154,8 +163,8 @@ class Payload_Fuzzer:
         ctrl = p.getlayer("Control Header")
         if ctrl is None:
             raise ValueError("Control header invalid!")
-        invalid_types = [0, 2, 3, 0xFF, 0x1000, 0xFFFF, random.randint(4, 0xFFFE)]
-        ctrl.MsgType = random.choice(invalid_types)
+        invalid_types = [0, 2, 3, 0xFF, 0x1000, 0xFFFF, self._rng.randint(4, 0xFFFE)]
+        ctrl.MsgType = self._rng.choice(invalid_types)
         return p
 
     def fuzz_ctrl_seqnum(self, pkt: Packet | None = None) -> Packet:
@@ -171,7 +180,7 @@ class Payload_Fuzzer:
         ctrl = p.getlayer("Control Header")
         if ctrl is None:
             raise ValueError("Control header invalid!")
-        ctrl.SeqNum = random.choice([0, 1, 127, 128, 255, random.randint(0, 255)])
+        ctrl.SeqNum = self._rng.choice([0, 1, 127, 128, 255, self._rng.randint(0, 255)])
         return p
 
     def fuzz_ctrl_msgelemslen(self, pkt: Packet | None = None) -> Packet:
@@ -189,7 +198,7 @@ class Payload_Fuzzer:
         ctrl = p.getlayer("Control Header")
         if ctrl is None:
             raise ValueError("Control header invalid!")
-        ctrl.MsgElemsLen = random.choice([0, 1, 0xFFFF, random.randint(2, 0xFFFE)])
+        ctrl.MsgElemsLen = self._rng.choice([0, 1, 0xFFFF, self._rng.randint(2, 0xFFFE)])
         return p
 
     def fuzz_ctrl_flags(self, pkt: Packet | None = None) -> Packet:
@@ -206,7 +215,7 @@ class Payload_Fuzzer:
         ctrl = p.getlayer("Control Header")
         if ctrl is None:
             raise ValueError("Control header invalid!")
-        ctrl.Flags = random.randint(1, 0xFF)
+        ctrl.Flags = self._rng.randint(1, 0xFF)
         return p
 
     def fuzz_elem_type(self, pkt: Packet | None = None) -> Packet:
@@ -222,8 +231,8 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
-        target.Type = random.randint(0, 512)
+        target = self._rng.choice(elems)
+        target.Type = self._rng.randint(0, 512)
         return p
 
     def fuzz_elem_length(self, pkt: Packet | None = None) -> Packet:
@@ -239,8 +248,8 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
-        target.Length = random.randint(0, 512)
+        target = self._rng.choice(elems)
+        target.Length = self._rng.randint(0, 512)
         return p
 
     def fuzz_elem_length_zero(self, pkt: Packet | None = None) -> Packet:
@@ -256,7 +265,7 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
+        target = self._rng.choice(elems)
         target.Length = 0
         return p
 
@@ -274,7 +283,7 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
+        target = self._rng.choice(elems)
         target.Length = 0xFFFF
         return p
 
@@ -291,9 +300,9 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
-        new_len = random.randint(0, 256)
-        target.Value = bytes(random.getrandbits(8) for _ in range(new_len))
+        target = self._rng.choice(elems)
+        new_len = self._rng.randint(0, 256)
+        target.Value = bytes(self._rng.getrandbits(8) for _ in range(new_len))
         target.Length = new_len
         return p
 
@@ -311,8 +320,8 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         for elem in elems:
             if elem.Type == msg_type:
-                new_len = random.randint(0, 256)
-                elem.Value = bytes(random.getrandbits(8) for _ in range(new_len))
+                new_len = self._rng.randint(0, 256)
+                elem.Value = bytes(self._rng.getrandbits(8) for _ in range(new_len))
                 elem.Length = new_len
                 break
         return p
@@ -328,12 +337,12 @@ class Payload_Fuzzer:
         """
         p = self._clone(pkt)
         elems = self._iter_message_elements(p)
-        unknown_type = random.randint(0x8000, 0xFFFF)
-        data_len = random.randint(0, 32)
+        unknown_type = self._rng.randint(0x8000, 0xFFFF)
+        data_len = self._rng.randint(0, 32)
         unknown_elem = MessageElement(
             Type=unknown_type,
             Length=data_len,
-            Value=bytes(random.getrandbits(8) for _ in range(data_len))
+            Value=bytes(self._rng.getrandbits(8) for _ in range(data_len))
         )
         if not elems:
             # No existing elements: just append after Control Header
@@ -342,7 +351,7 @@ class Payload_Fuzzer:
             if ctrl:
                 ctrl.add_payload(unknown_elem)
             return p
-        insert_before = random.choice(elems)
+        insert_before = self._rng.choice(elems)
         # Walk the layer chain to find the parent of insert_before
         # 遍历层链，找到 insert_before 的父层
         cur = p
@@ -367,7 +376,7 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if len(elems) < 2:
             return p
-        target = random.choice(elems)
+        target = self._rng.choice(elems)
         # Find the layer immediately before target and re-link around it
         # 找到 target 的前一层，绕过 target 重新链接
         cur = p
@@ -383,7 +392,7 @@ class Payload_Fuzzer:
         """
         Intentionally remove one of the mandatory MessageElement types
         (Discovery Type=20, WTP Board Data=38, WTP Descriptor=39) chosen at
-        random.  This is a targeted test for missing-required-element handling.
+        self._rng.  This is a targeted test for missing-required-element handling.
 
         有意删除必要 MessageElement 类型（Discovery Type=20、WTP Board Data=38、
         WTP Descriptor=39）中随机选中的一个，定向测试 AC 缺少必要元素时的处理逻辑。
@@ -394,7 +403,7 @@ class Payload_Fuzzer:
         candidates = [e for e in elems if e.Type in REQUIRED_TYPES]
         if not candidates:
             return p
-        target = random.choice(candidates)
+        target = self._rng.choice(candidates)
         cur = p
         while cur.payload is not None and cur.payload is not target:
             cur = cur.payload
@@ -417,9 +426,19 @@ class Payload_Fuzzer:
         elems = self._iter_message_elements(p)
         if not elems:
             return p
-        target = random.choice(elems)
-        dup = target.copy()
-        target.add_payload(dup)
+        target = self._rng.choice(elems)
+        # add_payload() on a layer that already carries the rest of the chain
+        # would replace — and silently drop — everything after it; build the
+        # copy as a fresh element and splice it in next to the original.
+        dup = MessageElement(Type=target.Type, Length=target.Length, Value=bytes(target.Value))
+        cur = p
+        while cur.payload is not None and cur.payload is not target:
+            cur = cur.payload
+        if cur.payload is not target:
+            return p
+        cur.remove_payload()
+        cur.add_payload(dup)
+        dup.add_payload(target)
         return p
 
     def fuzz_elem_order_shuffle(self, pkt: Packet | None = None) -> Packet:
@@ -440,13 +459,19 @@ class Payload_Fuzzer:
         parent = p
         while parent.payload is not first:
             parent = parent.payload
-        random.shuffle(elems)
+        # Detach the element chain from parent and break the links between
+        # elements first: relinking shuffled layers that still carry their
+        # old payload pointers would corrupt the chain (add_payload on a
+        # layer that already has a payload replaces/drops the rest).
+        parent.remove_payload()
+        for e in elems:
+            e.remove_payload()
+        self._rng.shuffle(elems)
         new_chain = elems[0]
         cur = new_chain
         for e in elems[1:]:
             cur.add_payload(e)
             cur = e
-        parent.remove_payload()
         parent.add_payload(new_chain)
         return p
 
@@ -488,9 +513,9 @@ class Payload_Fuzzer:
         模拟分散在整个报文中的位错误式随机损坏。
         """
         raw = self._pkt_to_raw(pkt)
-        for _ in range(random.randint(1, max(1, len(raw) // 10))):
-            idx = random.randint(0, len(raw) - 1)
-            raw[idx] = random.getrandbits(8)
+        for _ in range(self._rng.randint(1, max(1, len(raw) // 10))):
+            idx = self._rng.randint(0, len(raw) - 1)
+            raw[idx] = self._rng.getrandbits(8)
         return self._raw_to_pkt(raw, pkt)
 
     def brutal_insert_random_bytes(self, pkt: Packet) -> Packet:
@@ -504,9 +529,9 @@ class Payload_Fuzzer:
         使基于长度的解析失效。
         """
         raw = self._pkt_to_raw(pkt)
-        for _ in range(random.randint(1, 5)):
-            idx = random.randint(0, len(raw))
-            raw[idx:idx] = bytes([random.getrandbits(8) for _ in range(random.randint(1, 5))])
+        for _ in range(self._rng.randint(1, 5)):
+            idx = self._rng.randint(0, len(raw))
+            raw[idx:idx] = bytes([self._rng.getrandbits(8) for _ in range(self._rng.randint(1, 5))])
         return self._raw_to_pkt(raw, pkt)
 
     def brutal_delete_random_bytes(self, pkt: Packet) -> Packet:
@@ -519,10 +544,10 @@ class Payload_Fuzzer:
         缩短报文并偏移字段偏移量，导致固定偏移解析器对齐错误。
         """
         raw = self._pkt_to_raw(pkt)
-        for _ in range(random.randint(1, 5)):
+        for _ in range(self._rng.randint(1, 5)):
             if len(raw) == 0:
                 break
-            idx = random.randint(0, len(raw) - 1)
+            idx = self._rng.randint(0, len(raw) - 1)
             del raw[idx]
         return self._raw_to_pkt(raw, pkt)
 
@@ -536,7 +561,7 @@ class Payload_Fuzzer:
         产生最大程度的混乱输入，可用作 AC 处理垃圾数据时健壮性的极端测试。
         """
         raw = self._pkt_to_raw(pkt)
-        random.shuffle(raw)
+        self._rng.shuffle(raw)
         return self._raw_to_pkt(raw, pkt)
 
     def brutal_duplicate_segment(self, pkt: Packet) -> Packet:
@@ -551,10 +576,10 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
             return pkt
-        start = random.randint(0, len(raw) // 2)
-        end = random.randint(start + 1, len(raw))
+        start = self._rng.randint(0, len(raw) // 2)
+        end = self._rng.randint(start + 1, len(raw))
         segment = raw[start:end]
-        idx = random.randint(0, len(raw))
+        idx = self._rng.randint(0, len(raw))
         raw[idx:idx] = segment
         return self._raw_to_pkt(raw, pkt)
 
@@ -571,8 +596,8 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
             return pkt
-        start = random.randint(0, len(raw) - 2)
-        end = random.randint(start + 1, len(raw))
+        start = self._rng.randint(0, len(raw) - 2)
+        end = self._rng.randint(start + 1, len(raw))
         raw[start:end] = reversed(raw[start:end])
         return self._raw_to_pkt(raw, pkt)
 
@@ -588,9 +613,9 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) == 0:
             return pkt
-        for _ in range(random.randint(1, 8)):
-            idx = random.randint(0, len(raw) - 1)
-            bit = 1 << random.randint(0, 7)
+        for _ in range(self._rng.randint(1, 8)):
+            idx = self._rng.randint(0, len(raw) - 1)
+            bit = 1 << self._rng.randint(0, 7)
             raw[idx] ^= bit
         return self._raw_to_pkt(raw, pkt)
 
@@ -606,8 +631,8 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
             return pkt
-        start = random.randint(0, len(raw) - 1)
-        end = random.randint(start + 1, len(raw))
+        start = self._rng.randint(0, len(raw) - 1)
+        end = self._rng.randint(start + 1, len(raw))
         for i in range(start, end):
             raw[i] = 0x00
         return self._raw_to_pkt(raw, pkt)
@@ -624,9 +649,9 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
             return pkt
-        fill_byte = random.choice([0xFF, 0xAA, 0x55, 0x01, random.getrandbits(8)])
-        start = random.randint(0, len(raw) - 1)
-        end = random.randint(start + 1, len(raw))
+        fill_byte = self._rng.choice([0xFF, 0xAA, 0x55, 0x01, self._rng.getrandbits(8)])
+        start = self._rng.randint(0, len(raw) - 1)
+        end = self._rng.randint(start + 1, len(raw))
         for i in range(start, end):
             raw[i] = fill_byte
         return self._raw_to_pkt(raw, pkt)
@@ -643,5 +668,5 @@ class Payload_Fuzzer:
         raw = self._pkt_to_raw(pkt)
         if len(raw) < 2:
             return pkt
-        cut = random.randint(1, len(raw) - 1)
+        cut = self._rng.randint(1, len(raw) - 1)
         return self._raw_to_pkt(raw[:cut], pkt)

@@ -76,11 +76,10 @@ class ResponseParser:
         try:
             self._bind_layers()
 
-            # 去掉 IP/UDP 首部
-            if raw_data[:20] and raw_data[0] >> 4 == 4:
-                ip_len = (raw_data[0] & 0x0F) * 4
-                raw_data = raw_data[ip_len + 8:]  # UDP header固定8字节
-
+            # raw_data comes from recvfrom() on a UDP socket: it is the CAPWAP
+            # payload itself, with no IP/UDP header. (A previous heuristic
+            # stripped 8 bytes whenever the first byte's high nibble was 4,
+            # corrupting well-formed responses with CAPWAP version=4.)
             pkt = CAPWAP_Header(raw_data)
 
             # 完整 Scapy 对象

@@ -121,6 +121,21 @@ def _read_vmvirt_kb(pid: int) -> int | None:
     return None
 
 
+def _parse_stat_cpu_times(stat_content: str) -> tuple[int, int] | None:
+    """Parse (utime, stime) from /proc/<pid>/stat content.
+
+    Splitting after the closing ')' of the comm field keeps the indices stable
+    even when the process name itself contains spaces or parentheses.
+    在 comm 字段的右括号之后切分，comm 含空格时字段下标依然正确。
+    """
+    try:
+        fields = stat_content[stat_content.rfind(")") + 1:].split()
+        # after comm: [0]=state ... [11]=utime, [12]=stime
+        return int(fields[11]), int(fields[12])
+    except (IndexError, ValueError):
+        return None
+
+
 def _read_cpu_times(pid: int) -> tuple[int, int] | None:
     """Read (utime, stime) from /proc/<pid>/stat.
 
@@ -129,10 +144,8 @@ def _read_cpu_times(pid: int) -> tuple[int, int] | None:
     """
     try:
         with open(f"/proc/{pid}/stat") as f:
-            fields = f.read().split()
-        # utime=field[13], stime=field[14] (0-indexed)
-        return int(fields[13]), int(fields[14])
-    except (OSError, IndexError, ValueError):
+            return _parse_stat_cpu_times(f.read())
+    except OSError:
         return None
 
 

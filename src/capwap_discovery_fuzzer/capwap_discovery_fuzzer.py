@@ -53,26 +53,40 @@ class CAPWAPDiscoveryFuzzer:
             json.dump(session, f, indent=2)
 
     # -------------------- 发送报文 --------------------
+    def _recv_from_target(self, sock) -> bytes | None:
+        """Receive one datagram, ignoring replies from unexpected peers in unicast mode.
+
+        recvfrom() on a UDP socket returns the CAPWAP payload (no IP/UDP header).
+        In unicast mode only datagrams from the target AC are accepted, so a
+        stray packet from another host cannot be misattributed as a target
+        response. In broadcast mode any responder is accepted.
+        """
+        while True:
+            try:
+                data, addr = sock.recvfrom(65535)
+            except _socket.timeout:
+                return None
+            if self.broadcast or self.ac_ip is None or addr[0] == self.ac_ip:
+                return data
+            logging.debug("Ignoring response from unexpected peer %s (expected %s)", addr[0], self.ac_ip)
+
     def send_discovery_request(self, discovery_request):
         """发送 CAPWAP Discovery Request，返回 (capwap_bytes, raw_response_or_None)。
         capwap_bytes 是实际发出的 UDP payload（无 IP/UDP 头），供日志和重放直接使用。
-        raw_response 是 recvfrom 返回的完整字节（含 IP/UDP 头），供 ResponseParser 解析。
+        raw_response 是 recvfrom 返回的 UDP payload（同样不含 IP/UDP 头），None 表示超时。
+        单播模式下只接受来自目标 AC 的回包。
         """
-        sport = self._rng.randint(20000, 60000)
         dst = "255.255.255.255" if self.broadcast else self.ac_ip
         payload_bytes = bytes(discovery_request)
 
         sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         if self.broadcast:
             sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
-        sock.bind(('', sport))
         sock.settimeout(self.timeout)
 
         try:
             sock.sendto(payload_bytes, (dst, self.ac_port))
-            raw_resp, _ = sock.recvfrom(65535)
-        except _socket.timeout:
-            raw_resp = None
+            raw_resp = self._recv_from_target(sock)
         finally:
             sock.close()
 
@@ -141,11 +155,9 @@ class CAPWAPDiscoveryFuzzer:
             if self.broadcast:
                 sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
             sock.settimeout(timeout)
-            sport = self._rng.randint(20000, 60000)
-            sock.bind(('', sport))
             try:
                 sock.sendto(bytes(probe_pkt), (dst, self.ac_port))
-                raw_resp, _ = sock.recvfrom(65535)
+                raw_resp = self._recv_from_target(sock)
                 if raw_resp:
                     logging.debug("Probe attempt %d/%d: target responded", attempt, retries)
                     return True
@@ -160,11 +172,19 @@ class CAPWAPDiscoveryFuzzer:
         return False
 
     # -------------------- 从 PCAP 加载 --------------------
-    def load_request_from_pcap(self, pcap_path: str) -> bytes:
+    @staticmethod
+    def load_request_from_pcap(pcap_path: str) -> Packet:
+        """Load the first UDP/5246 payload from a pcap as a parsed Packet.
+
+        Returns a Scapy Packet (previously raw bytes, which crashed fuzzing()'s
+        base_pkt.copy() on the first round) so the packet can be cloned and
+        mutated like a locally built one. Raises ValueError if no CAPWAP
+        Discovery Request is present in the pcap.
+        """
         pkts = rdpcap(pcap_path)
         for pkt in pkts:
             if pkt.haslayer(UDP) and pkt["UDP"].dport == 5246:
-                return bytes(pkt["UDP"].payload)
+                return parse_discovery_request(bytes(pkt["UDP"].payload))
         raise ValueError("No CAPWAP Discovery Request found in pcap!")
 
     # -------------------- 进程存活（供子类覆盖） --------------------
@@ -190,7 +210,7 @@ class CAPWAPDiscoveryFuzzer:
         else:
             base_pkt = self.payload_creator.create_discovery_request(valid=True)
 
-        fuzzer = Payload_Fuzzer(base_pkt)
+        fuzzer = Payload_Fuzzer(base_pkt, rng=self._rng)
 
         def fuzz_elem_value_type38(pkt=None): return fuzzer.fuzz_elem_value_by_type(38, pkt)
         def fuzz_elem_value_type39(pkt=None): return fuzzer.fuzz_elem_value_by_type(39, pkt)
@@ -326,19 +346,19 @@ class CAPWAPDiscoveryFuzzer:
     def replay_request_from_record(self, record: dict, src_port: int | None = None):
         """从 records.jsonl 的一条记录重放请求，使用原生 socket（与 fuzzing 路径一致）。"""
         raw_payload = bytes.fromhex(record["request_hex"])
-        sport = src_port or self._rng.randint(20000, 60000)
         dst = "255.255.255.255" if self.broadcast else self.ac_ip
 
         sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         if self.broadcast:
             sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
-        sock.bind(('', sport))
+        if src_port:
+            sock.bind(('', src_port))
         sock.settimeout(self.timeout)
 
         t0 = time.monotonic()
         try:
             sock.sendto(raw_payload, (dst, self.ac_port))
-            raw_resp, _ = sock.recvfrom(65535)
+            raw_resp = self._recv_from_target(sock)
         except _socket.timeout:
             raw_resp = None
         finally:

@@ -12,6 +12,7 @@ import struct
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_helpers import flat, invoke_cli
 from capwap_discovery_fuzzer import conformance as cf
 from capwap_discovery_fuzzer.cli import app
 from capwap_discovery_fuzzer.vendors.cisco.creator import (
@@ -153,24 +154,21 @@ def test_omitting_every_element_is_rejected():
 # --------------------------------------------------------------- CLI plumbing
 
 def test_cli_rejects_identity_options_for_other_vendors():
-    result = CliRunner().invoke(app, ["--ac-ip", "127.0.0.1", "--vendor", "generic",
-                                      "--ap-name", "X"])
+    result = invoke_cli(app, ["--ac-ip", "127.0.0.1", "--vendor", "generic", "--ap-name", "X"])
     assert result.exit_code != 0
-    assert "only apply to --vendor cisco" in result.output
+    assert "only apply to --vendor cisco" in flat(result.output)
 
 
 def test_cli_rejects_a_bad_mac():
-    result = CliRunner().invoke(app, ["--ac-ip", "127.0.0.1", "--vendor", "cisco",
-                                      "--ap-mac", "zzzz"])
+    result = invoke_cli(app, ["--ac-ip", "127.0.0.1", "--vendor", "cisco", "--ap-mac", "zzzz"])
     assert result.exit_code != 0
-    assert "--ap-mac must be hex" in result.output
+    assert "--ap-mac must be hex" in flat(result.output)
 
 
 def test_cli_rejects_a_short_mac():
-    result = CliRunner().invoke(app, ["--ac-ip", "127.0.0.1", "--vendor", "cisco",
-                                      "--ap-mac", "aabb"])
+    result = invoke_cli(app, ["--ac-ip", "127.0.0.1", "--vendor", "cisco", "--ap-mac", "aabb"])
     assert result.exit_code != 0
-    assert "must be 6 bytes" in result.output
+    assert "must be 6 bytes" in flat(result.output)
 
 
 def test_cli_builds_and_records_the_seed_identity(tmp_path, monkeypatch):

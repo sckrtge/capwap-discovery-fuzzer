@@ -13,6 +13,7 @@ import threading
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_helpers import flat, invoke_cli
 from capwap_discovery_fuzzer import weights
 from capwap_discovery_fuzzer.cli import app
 from capwap_discovery_fuzzer.weights import WeightScheduler, reward_for
@@ -212,6 +213,6 @@ def test_cli_rejects_bad_adapt_options():
         (["--adapt-reward", "nonsense"], "--adapt-reward must be"),
         (["--adapt-floor", "1.5"], "--adapt-floor must be in"),
     ):
-        result = CliRunner().invoke(app, ["--ac-ip", "127.0.0.1"] + args)
+        result = invoke_cli(app, ["--ac-ip", "127.0.0.1"] + args)
         assert result.exit_code != 0
-        assert expected in result.output
+        assert expected in flat(result.output)

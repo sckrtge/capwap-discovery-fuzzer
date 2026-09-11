@@ -25,6 +25,7 @@ import pytest
 from scapy.packet import Packet
 from typer.testing import CliRunner
 
+from tests.cli_helpers import flat, invoke_cli
 from capwap_discovery_fuzzer import lock_fuzzer
 from capwap_discovery_fuzzer.capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from capwap_discovery_fuzzer.cli import app
@@ -340,11 +341,11 @@ def test_lock_mode_off_keeps_original_pools(tmp_path, monkeypatch):
 
 
 def test_cli_rejects_unknown_lock_token():
-    result = CliRunner().invoke(
-        app, ["--ac-ip", "127.0.0.1", "--lock-fields", "msgtype,nonsense"]
-    )
+    # flat()/invoke_cli keep this width-independent: rich wraps error panels to
+    # the terminal width, so a raw substring check passes locally and can fail in CI.
+    result = invoke_cli(app, ["--ac-ip", "127.0.0.1", "--lock-fields", "msgtype,nonsense"])
     assert result.exit_code != 0
-    assert "nonsense" in result.output
+    assert "nonsense" in flat(result.output)
 
 
 # ------------------------------------------------- lock mode, end to end

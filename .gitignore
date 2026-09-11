@@ -41,3 +41,22 @@ ARCHITECTURE.md
 # Word/Office temp files
 ~$*
 ~WRL*.tmp
+
+# Secrets / credentials — never publish
+# NOTE: .gitignore does not affect files that are already tracked;
+# use `git rm --cached <path>` to untrack one of these.
+*.secret
+*secret*
+*.pem
+*.key
+*_rsa
+id_rsa*
+.env
+.env.*
+*credential*
+*password*
+*passwd*
+
+# Local run artifacts that may embed target addresses
+*_tail_*.jsonl
+c9800_stress_report_*.md

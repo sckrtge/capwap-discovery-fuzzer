@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G0.5 plaintext Join gate probe (docs/G05-明文Join门禁验证计划.md).
+"""G0.5 plaintext Join gate probe (docs/expired/G05-明文Join门禁验证计划.md).
 
 Builds an RFC 5415 §6.1-compliant Join Request by importing the fuzzer's Cisco
 element constructors READ-ONLY (no fuzzer code is modified), validates it with

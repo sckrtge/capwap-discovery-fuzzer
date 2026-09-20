@@ -333,7 +333,8 @@ class JoinStageFuzzer:
             for _ in range(rounds_per_variant):
                 round_no += 1
                 v = self.run_round(variant, round_no)
-                self.records.append({"round": round_no, **v.as_dict()})
+                rec = {"round": round_no, "ts": time.time(), **v.as_dict()}
+                self.records.append(rec)
                 key = v.outcome.value
                 stats[key] = stats.get(key, 0) + 1
                 if v.outcome == Outcome.ANSWERED:

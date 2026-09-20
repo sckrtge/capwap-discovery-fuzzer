@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| commit | `c3261c5`（P5 实现 + 逐轮应答摘要；前置 `c8c59c9`/`b1a41cb` 系列为阶段引擎与顺序修正） |
+| commit | `c3261c5`（P5 实现 + 逐轮应答摘要）；同轮序列 `c8c59c9`（阶段引擎）→ `d8a6aae`（§8.3 判据）→ `b3a2e8a`（非 join 阶段用黄金帧 join）→ `45f11af`（change-state 前置 Config Status）→ `342869c`（本报告） |
 | seed | 定向矩阵（变体名即变异描述，无需随机）；身份池 `--identity-base-mac 10a82992b000`（config）/`10a82992c000`（change-state） |
 | 参数 | `--ac-ip 192.168.10.201 --stage config\|change-state --variants all --rounds 2 --join-timeout 3 --settle 1.5 --close-wait 0.5 --stage-timeout 5 --round-gap 1`；证书 `e2ap4.crt/key`（路径传参，不入仓） |
 | 目标/时间 | C9800-fresh（C9800-CL 17.14.01），2026-09-20 12:17–12:20Z；config 30 轮 106 s、change-state 16 轮 58 s |

@@ -88,7 +88,8 @@ class SClientTransport(DTLSTransport):
     def __init__(self, ac_addr: tuple[str, int], cert_path: str, key_path: str,
                  proxy_port: int | None = None, openssl_bin: str = "openssl",
                  mtu: int = 512, prelude: bytes = b"",
-                 handshake_settle: float = 2.5, wlc_port: int = 0):
+                 handshake_settle: float = 1.5, wlc_port: int = 0,
+                 close_wait: float = 0.5):
         self.ac_addr = ac_addr
         self.cert_path = cert_path
         self.key_path = key_path
@@ -97,6 +98,7 @@ class SClientTransport(DTLSTransport):
         self.prelude = prelude
         self.proxy_port = proxy_port  # None → ephemeral
         self.handshake_settle = handshake_settle
+        self.close_wait = close_wait  # grace for close_notify before SIGKILL
         self.wlc_port = wlc_port      # fixed source port for the 5-tuple
         self._proxy: socket.socket | None = None
         self._wsock: socket.socket | None = None
@@ -193,23 +195,30 @@ class SClientTransport(DTLSTransport):
         """Block until the server's flight is complete, then settle.
 
         The first inbound datagram may be only the HelloVerifyRequest; the
-        flight is considered complete once no new wire bytes arrive for
-        ``quiet_window`` seconds.  Sending app data before the handshake
+        flight is considered complete once no new wire bytes have arrived for
+        ``handshake_settle`` seconds.  Sending app data before the handshake
         finishes makes the controller answer with an epoch-1 alert.
+
+        The wait is measured from the **last** inbound byte rather than from
+        the first one: the earlier formulation slept twice per call, which put
+        a hard 5 s floor on every round (2 x 2.5 s) regardless of how fast the
+        flight actually completed.
         """
         deadline = time.time() + timeout
         if not self._inbound_seen.wait(min(timeout, 10.0)):
             self.close()
             raise TransportError("no server flight observed")
-        quiet = self.handshake_settle
-        last = -1
+        settle = self.handshake_settle
+        last = self._wire_bytes
+        quiet_since = time.time()
         while time.time() < deadline:
             n = self._wire_bytes
-            if n == last:
-                time.sleep(self.handshake_settle)
+            if n != last:
+                last = n
+                quiet_since = time.time()
+            elif time.time() - quiet_since >= settle:
                 return
-            last = n
-            time.sleep(quiet)
+            time.sleep(0.05)
         self.close()
         raise TransportError(f"handshake flight timed out after {timeout}s")
 
@@ -295,9 +304,9 @@ class SClientTransport(DTLSTransport):
                 self._proc.stdin.close()
             except OSError:
                 pass
-            deadline = time.time() + 2.0
+            deadline = time.time() + self.close_wait
             while self._proc.poll() is None and time.time() < deadline:
-                time.sleep(0.1)
+                time.sleep(0.05)
         if self._proc is not None and self._proc.poll() is None:
             try:
                 self._proc.kill()

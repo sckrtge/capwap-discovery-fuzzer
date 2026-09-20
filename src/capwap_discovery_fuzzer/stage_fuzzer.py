@@ -49,7 +49,6 @@ from capwap_discovery_fuzzer.session.oracle import (
     Outcome,
     RoundVerdict,
 )
-from capwap_discovery_fuzzer.session.statemachine import TIMEOUT_JOIN_RESPONSE
 from capwap_discovery_fuzzer.session.transport import SClientTransport
 from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity
 
@@ -78,6 +77,46 @@ class JoinFuzzConfig:
     #: without changing the variant under test.
     retries: int = 1
     discovery_prelude: bool = True
+    #: Seconds to wait for the Join Response before calling the round silent.
+    #: A successful join answers within ~100 ms of the flight closing (runbook
+    #: §4); the old 15 s cap was pure dead time on every swallowed attempt.
+    join_timeout: float = 3.0
+    #: Quiet window that marks the server's DTLS flight complete.
+    handshake_settle: float = 1.5
+    #: Grace given to close_notify before SIGKILL.
+    close_wait: float = 0.5
+    #: Extra AP identities to rotate over (plan P4.5).  Empty = single identity,
+    #: which is the historical behaviour.
+    identity_pool: tuple[ApIdentity, ...] = ()
+
+    def identities(self) -> tuple[ApIdentity, ...]:
+        return self.identity_pool or (self.identity,)
+
+
+def build_identity_pool(base: ApIdentity, count: int) -> tuple[ApIdentity, ...]:
+    """``count`` distinct AP identities derived from ``base`` (plan P4.5).
+
+    Only the fields that make an AP *identifiable* vary — the CAPWAP optional
+    Radio MAC, the board-data base MAC, the WTP name and the serial suffix —
+    so a pool run and a single-identity run differ in the identity rotation
+    and nothing else.  ``count <= 1`` returns the base identity unchanged.
+    """
+    if count <= 1:
+        return ()
+    pool = [base]
+    for i in range(1, count):
+        mac = bytearray(base.ap_mac)
+        mac[-1] = (mac[-1] + i) % 256
+        mac_b = bytes(mac)
+        hexs = mac_b.hex().upper().encode()
+        name = b"AP" + hexs[0:4] + b"." + hexs[4:8] + b"." + hexs[8:12]
+        serial = base.serial[:-2] + f"{i:02d}".encode()
+        pool.append(ApIdentity(
+            ap_name=name, ap_mac=mac_b, model=base.model, serial=serial,
+            base_mac=mac_b, radios=base.radios, max_radios=base.max_radios,
+            radios_in_use=base.radios_in_use, num_encrypt=base.num_encrypt,
+            msg_type=base.msg_type))
+    return tuple(pool)
 
 
 def _shift_board_subelem_types(board: bytes, delta: int = 1) -> bytes:
@@ -141,14 +180,15 @@ LOCKED_ELEMENT_TYPES = frozenset({38, 35, 29, 1048})
 
 
 def build_unlocked_variant(cfg: JoinFuzzConfig, rng,
-                           session_id: bytes | None = None) -> tuple[bytes, dict]:
+                           session_id: bytes | None = None,
+                           identity: ApIdentity | None = None) -> tuple[bytes, dict]:
     """One random mutation of one *open* (non-frozen) element.
 
     Realises the plan's "未锁定对照": frozen identity elements stay byte-exact,
     everything else gets one of: value byte-flip / value zero-fill / value
     truncation / element drop.  Returns ``(frame, mutation_descriptor)``.
     """
-    raw = build_variant("base", cfg, session_id=session_id)
+    raw = build_variant("base", cfg, session_id=session_id, identity=identity)
     elems = _element_offsets(raw)
     open_idx = [i for i, (t, _s, _l) in enumerate(elems)
                 if t not in LOCKED_ELEMENT_TYPES]
@@ -184,9 +224,13 @@ def _shorten_session_id(raw: bytes, size: int) -> bytes:
 
 
 def build_variant(name: str, cfg: JoinFuzzConfig,
-                  session_id: bytes | None = None) -> bytes:
-    """Build one Join Request for the named variant (defaults = ``base``)."""
-    ident = cfg.identity
+                  session_id: bytes | None = None,
+                  identity: ApIdentity | None = None) -> bytes:
+    """Build one Join Request for the named variant (defaults = ``base``).
+
+    ``identity`` overrides ``cfg.identity`` — the identity pool rotates over it.
+    """
+    ident = identity if identity is not None else cfg.identity
     sid = session_id if session_id is not None else secrets.token_bytes(16)
     kwargs: dict = dict(identity=ident, session_id=sid, local_ip=cfg.local_ip)
 
@@ -261,35 +305,47 @@ class JoinStageFuzzer:
         because the controller's per-AP-MAC session cleanup makes roughly
         every second attempt go silent regardless of the payload.
         """
+        ident = self._identity_for(round_no)
         attempts = 0
         verdict = None
         while attempts <= self.cfg.retries:
             attempts += 1
-            verdict = self._attempt(variant, round_no, session_id)
+            verdict = self._attempt(variant, round_no, session_id, ident)
             if verdict.outcome == Outcome.ANSWERED or \
                     "transport_error" in verdict.mutation:
                 break
         verdict.mutation["attempts"] = attempts
         return verdict
 
+    def _identity_for(self, round_no: int) -> ApIdentity:
+        """Round-robin over the identity pool (plan P4.5); index 0 = base AP."""
+        pool = self.cfg.identities()
+        return pool[(round_no - 1) % len(pool)]
+
     def _attempt(self, variant: str, round_no: int,
-                 session_id: bytes | None = None) -> RoundVerdict:
+                 session_id: bytes | None = None,
+                 ident: ApIdentity | None = None) -> RoundVerdict:
         cfg = self.cfg
-        discovery = self._discovery_bytes() if cfg.discovery_prelude else b""
+        ident = ident if ident is not None else cfg.identity
+        discovery = self._discovery_bytes(ident) if cfg.discovery_prelude else b""
         t = SClientTransport(cfg.ac_addr, cert_path=cfg.cert_path,
                              key_path=cfg.key_path, openssl_bin=self.openssl_bin,
-                             prelude=discovery)
+                             prelude=discovery,
+                             handshake_settle=cfg.handshake_settle,
+                             close_wait=cfg.close_wait)
         v = None
         try:
             t.connect(timeout=cfg.connect_timeout)
             t.wait_handshake(timeout=cfg.connect_timeout)
             mark = t.snapshot()          # ignore handshake-flight bytes
             if variant == "unlocked":
-                raw, mut = build_unlocked_variant(cfg, self._rng, session_id=session_id)
+                raw, mut = build_unlocked_variant(cfg, self._rng, session_id=session_id,
+                                                  identity=ident)
             else:
-                raw, mut = build_variant(variant, cfg, session_id=session_id), None
+                raw, mut = build_variant(variant, cfg, session_id=session_id,
+                                         identity=ident), None
             t.send(raw)
-            reply = t.recv_since(mark, timeout=TIMEOUT_JOIN_RESPONSE)
+            reply = t.recv_since(mark, timeout=cfg.join_timeout)
             outcome, code = oracle.classify_reply(reply)
             if outcome == Outcome.SILENCE and not t.is_alive:
                 # the controller closed the DTLS session right after our send —
@@ -299,7 +355,8 @@ class JoinStageFuzzer:
                 for m in parse_control_messages(reply):
                     if m["msg_type"] == 4:
                         code = builders.result_code_of(m)
-            m = {"variant": variant, "round": round_no}
+            m = {"variant": variant, "round": round_no,
+                 "ap_mac": ident.ap_mac.hex()}
             if mut:
                 m.update(mut)
             v = RoundVerdict(
@@ -308,6 +365,7 @@ class JoinStageFuzzer:
         except Exception as exc:  # noqa: BLE001 - transport failures are data
             v = RoundVerdict(stage="join", outcome=Outcome.SILENCE,
                              mutation={"variant": variant, "round": round_no,
+                                       "ap_mac": ident.ap_mac.hex(),
                                        "transport_error": str(exc)[:200]})
             if not isinstance(exc, (TimeoutError,)):
                 # surface driver bugs immediately instead of poisoning the run
@@ -317,10 +375,10 @@ class JoinStageFuzzer:
             time.sleep(self.cfg.round_gap_s)
         return v
 
-    def _discovery_bytes(self) -> bytes:
+    def _discovery_bytes(self, ident: ApIdentity | None = None) -> bytes:
         """Discovery Request prelude (same 5-tuple as the DTLS session)."""
         from capwap_discovery_fuzzer.vendors.cisco.creator import CiscoPayloadCreator
-        return bytes(CiscoPayloadCreator(identity=self.cfg.identity)
+        return bytes(CiscoPayloadCreator(identity=ident or self.cfg.identity)
                      .create_discovery_request(valid=True))
 
     def run(self, variants: list[str], rounds_per_variant: int = 1,
@@ -393,6 +451,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds between rounds; the controller keeps a "
                          "joined session for a while and drops the next join "
                          "until its cleanup settles")
+    ap.add_argument("--join-timeout", type=float, default=3.0,
+                    help="seconds to wait for the Join Response (a successful "
+                         "join answers within ~100 ms; the old 15 s cap was dead "
+                         "time on every swallowed attempt)")
+    ap.add_argument("--settle", type=float, default=1.5,
+                    help="quiet window that marks the server DTLS flight done")
+    ap.add_argument("--close-wait", type=float, default=0.5,
+                    help="grace for close_notify before SIGKILL")
+    ap.add_argument("--identity-pool", type=int, default=1,
+                    help="rotate over N derived AP identities (plan P4.5); "
+                         "1 = single identity (default, historical behaviour)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--openssl", default="openssl")
     args = ap.parse_args(argv)
@@ -405,12 +474,15 @@ def main(argv: list[str] | None = None) -> int:
 
     identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
                           model=args.model.encode())
+    pool = build_identity_pool(identity, args.identity_pool)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = JoinFuzzConfig(ac_addr=(args.ac_ip, args.ac_port),
                          cert_path=args.cert, key_path=args.key,
                          identity=identity, out_dir=out_dir,
-                         local_ip=args.local_ip, round_gap_s=args.round_gap)
+                         local_ip=args.local_ip, round_gap_s=args.round_gap,
+                         join_timeout=args.join_timeout, handshake_settle=args.settle,
+                         close_wait=args.close_wait, identity_pool=pool)
     fuzzer = JoinStageFuzzer(cfg, openssl_bin=args.openssl, seed=args.seed)
 
     def progress(round_no: int, variant: str, v: RoundVerdict) -> None:
@@ -425,6 +497,10 @@ def main(argv: list[str] | None = None) -> int:
                     "rounds_per_variant": args.rounds_per_variant,
                     "seed": args.seed,
                     "round_gap_s": args.round_gap,
+                    "join_timeout_s": args.join_timeout,
+                    "handshake_settle_s": args.settle,
+                    "close_wait_s": args.close_wait,
+                    "identity_pool": [i.ap_mac.hex() for i in cfg.identities()],
                     "model": args.model,
                     "ac_ip": args.ac_ip,
                     "summary": summary}, ensure_ascii=False, indent=2),

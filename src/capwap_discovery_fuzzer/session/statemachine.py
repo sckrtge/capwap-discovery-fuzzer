@@ -37,7 +37,18 @@ class Stage(enum.Enum):
 
 #: Measured budgets, seconds.  Documented in the runbook §6.
 TIMEOUT_HANDSHAKE = 25.0      # s_client negotiation incl. server cert flight
-TIMEOUT_JOIN_RESPONSE = 15.0  # Join Response arrival after Join Request
+#: Join Response arrival after Join Request.  A *successful* join answers within
+#: ~100 ms of the server flight closing (runbook §4), so 15 s is a ceiling for
+#: the failing case only; the stage fuzzer defaults to a much shorter cap
+#: (``JoinFuzzConfig.join_timeout``) to stop paying it on every silent round.
+TIMEOUT_JOIN_RESPONSE = 15.0
+#: How long the controller keeps a session for an AP after the client leaves,
+#: during which a new handshake for that same identity is swallowed.  Measured
+#: 2026-09-20: Join-phase btrace shows "Heart beat timer expiry, Phase: Join"
+#: after ~32 s; the practical penalty is one swallowed attempt (~20 s) per
+#: round with a fresh source port.  Rotating source ports / identities (plan
+#: P4.5) is the mitigation; the exact key is still undetermined.
+SESSION_CLEANUP_WINDOW_S = 20.0
 TIMEOUT_CONFIG_RESPONSE = 12.0
 TIMEOUT_CHANGE_STATE_RESPONSE = 12.0
 TIMEOUT_ECHO_RESPONSE = 8.0

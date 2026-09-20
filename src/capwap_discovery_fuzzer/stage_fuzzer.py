@@ -199,6 +199,15 @@ def _patch_element(raw: bytes, elem_index: int, new_value: bytes | None) -> byte
 #: everything else is open to the unlocked baseline's random mutation.
 LOCKED_ELEMENT_TYPES = frozenset({38, 35, 29, 1048})
 
+#: RFC 5415 §8.3 MUST list for the Configuration Status Response
+#: (``rfc5415.txt`` 6414-6430): CAPWAP Timers(12), Decryption Error Report
+#: Period(16), Idle Timeout(23), WTP Fallback(40), plus "one or both" of
+#: AC IPv4 List(2) / AC IPv6 List(3).  **Result Code is not in that list** —
+#: unlike the request, this response carries no verdict element, so the P5
+#: oracle scores the element set (and session survival) instead of a code.
+CONFIG_RESPONSE_MUST = (12, 16, 23, 40)
+CONFIG_RESPONSE_MUST_EITHER = (2, 3)
+
 
 def build_unlocked_variant(cfg: JoinFuzzConfig, rng,
                            session_id: bytes | None = None,
@@ -581,6 +590,18 @@ class JoinStageFuzzer:
                     want = 6 if stage == "config" else 12
                     reply, outcome, code = self._stage_round(t, stage_raw, want)
                     m["stage_rc"] = code
+                    if stage == "config" and outcome == Outcome.ANSWERED:
+                        # §8.3 has no Result Code: score the response's element
+                        # set against the RFC MUST list instead
+                        types = {t_ for msg in parse_control_messages(reply)
+                                 if msg["msg_type"] == want
+                                 for t_, _l, _v in msg["elements"]}
+                        m["resp_types"] = sorted(types)
+                        missing = [t_ for t_ in CONFIG_RESPONSE_MUST
+                                   if t_ not in types]
+                        if not types & set(CONFIG_RESPONSE_MUST_EITHER):
+                            missing.append("2|3")
+                        m["missing_must"] = missing
                     if stage == "config":
                         # survival probe: a config the AC accepted leaves the
                         # session able to complete the Change State handshake

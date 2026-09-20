@@ -587,6 +587,14 @@ class JoinStageFuzzer:
                 m["join_outcome"] = outcome.value
                 m["join_rc"] = code
                 if code == RESULT_CODE_SUCCESS:
+                    if stage == "change-state":
+                        # §2.3.1(g): the Configure state is entered by a
+                        # Configuration Status Request, and Change State only
+                        # makes sense after it — send the golden one first
+                        _r, cfg_outcome, _c = self._stage_round(
+                            t, builders.build_config_status(
+                                ident, reg_domain_code=cfg.reg_domain_code), 6)
+                        m["config_outcome"] = cfg_outcome.value
                     stage_raw = (build_config_variant(variant, cfg, ident)
                                  if stage == "config"
                                  else build_change_state_variant(variant, cfg, ident))

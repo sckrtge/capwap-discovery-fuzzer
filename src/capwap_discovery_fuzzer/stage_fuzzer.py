@@ -34,6 +34,7 @@ is killed between rounds (orphaned clients poison later sessions).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import struct
@@ -620,6 +621,12 @@ class JoinStageFuzzer:
                             t, builders.build_change_state(ident, seq_num=2), 12)
                         m["survives"] = fut_outcome == Outcome.ANSWERED
                         m["survives_rc"] = fut_code
+            if reply:
+                # raw_reply_hex is truncated for the record; the digest covers
+                # the WHOLE reply so "the controller answered identically" can
+                # be a byte-exact claim (P5)
+                m["reply_sha256"] = hashlib.sha256(reply).hexdigest()
+                m["reply_len"] = len(reply)
             v = RoundVerdict(
                 stage=stage, outcome=outcome, result_code=code,
                 mutation=m, raw_reply_hex=reply.hex()[:256] if reply else None)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from capwap_discovery_fuzzer.session.builders import parse_control_messages
@@ -180,6 +182,114 @@ def test_single_identity_defaults_unchanged():
     assert cfg.identities() == (cfg.identity,)
     assert build_variant("base", cfg, session_id=bytes(16)) == \
         build_variant("base", cfg, session_id=bytes(16), identity=cfg.identity)
+
+
+# ------------------------------------------------- P5 config / change state
+
+def test_config_variants_parse_and_base_is_golden():
+    from capwap_discovery_fuzzer.stage_fuzzer import (
+        CONFIG_VARIANTS, build_config_variant)
+    cfg = _cfg(None)
+    ident = _golden_identity()
+    for name in CONFIG_VARIANTS:
+        raw = build_config_variant(name, cfg, ident)
+        msgs = parse_control_messages(raw)
+        assert len(msgs) == 1 and msgs[0]["msg_type"] == 5, name
+    golden = (Path(__file__).parent / "golden" / "golden_csr.bin").read_bytes()
+    assert build_config_variant("base", cfg, ident) == golden
+
+
+def test_change_state_variants_parse_and_base_is_golden():
+    from capwap_discovery_fuzzer.stage_fuzzer import (
+        CHANGE_STATE_VARIANTS, build_change_state_variant)
+    cfg = _cfg(None)
+    ident = _golden_identity()
+    for name in CHANGE_STATE_VARIANTS:
+        raw = build_change_state_variant(name, cfg, ident)
+        msgs = parse_control_messages(raw)
+        assert len(msgs) == 1 and msgs[0]["msg_type"] == 11, name
+    golden = (Path(__file__).parent / "golden" / "golden_cse.bin").read_bytes()
+    assert build_change_state_variant("base", cfg, ident) == golden
+
+
+def _seq_of(raw):
+    """Control_Header SeqNum: MsgType(4B) then SeqNum(1B), at hlen + 4."""
+    return raw[((raw[1] >> 3) & 0x1F) * 4 + 4]
+
+
+def _types(raw):
+    return [t for t, _l, _v in parse_control_messages(raw)[0]["elements"]]
+
+
+def _vsp_values(raw, elem_id):
+    out = []
+    for t, _l, v in parse_control_messages(raw)[0]["elements"]:
+        if t == 37 and int.from_bytes(v[4:6], "big") == elem_id:
+            out.append(v)
+    return out
+
+
+def test_config_must_ablations_drop_their_element():
+    from capwap_discovery_fuzzer.stage_fuzzer import build_config_variant
+    cfg, ident = _cfg(None), _golden_identity()
+    base_types = _types(build_config_variant("base", cfg, ident))
+    for name, etype in (("omit-4", 4), ("omit-timer36", 36), ("omit-reboot48", 48)):
+        assert base_types.count(etype) == 1
+        assert etype not in _types(build_config_variant(name, cfg, ident))
+    assert base_types.count(31) == 2
+    assert 31 not in _types(build_config_variant("omit-radio-admin", cfg, ident))
+
+
+def test_config_vsp126_variants_reproduce_the_e7_bug():
+    from capwap_discovery_fuzzer.stage_fuzzer import build_config_variant
+    from capwap_discovery_fuzzer.session.vsp import VSP_ELEM_REG_DOMAIN
+    cfg, ident = _cfg(None), _golden_identity()
+    base = build_config_variant("base", cfg, ident)
+    assert len(_vsp_values(base, VSP_ELEM_REG_DOMAIN)) == 2
+
+    # 7-byte header: the ElemID parses as 0x0000 (E7's silent-drop switch) —
+    # byte-identical to the pre-fix golden (132 B / 16d283e1...)
+    len7 = build_config_variant("vsp126-len7", cfg, ident)
+    assert len(len7) == len(base) + 2 and not _vsp_values(len7, VSP_ELEM_REG_DOMAIN)
+    assert len7.hex().find("0040960000007e") >= 0
+
+    assert not _vsp_values(build_config_variant("vsp126-elemid-0", cfg, ident),
+                           VSP_ELEM_REG_DOMAIN)
+    assert not _vsp_values(build_config_variant("vsp126-elemid-207", cfg, ident),
+                           VSP_ELEM_REG_DOMAIN)
+    assert len(_vsp_values(build_config_variant("omit-vsp126", cfg, ident),
+                           VSP_ELEM_REG_DOMAIN)) == 0
+    for name, code in (("vsp126-code-0", b"\x00\x00"),
+                       ("vsp126-code-ffff", b"\xff\xff")):
+        vals = _vsp_values(build_config_variant(name, cfg, ident), VSP_ELEM_REG_DOMAIN)
+        assert len(vals) == 2 and all(v[9:11] == code for v in vals)
+
+
+def test_config_order_duplicate_and_seq_variants():
+    from capwap_discovery_fuzzer.stage_fuzzer import build_config_variant
+    cfg, ident = _cfg(None), _golden_identity()
+    base = build_config_variant("base", cfg, ident)
+    assert _types(build_config_variant("dup-radio-admin", cfg, ident)).count(31) == 3
+    assert _types(build_config_variant("swap-first-two", cfg, ident))[:2] == [31, 4]
+    assert _seq_of(build_config_variant("seq-old", cfg, ident)) == 0
+    assert _seq_of(build_config_variant("base", cfg, ident)) == 1
+    with pytest.raises(ValueError):
+        build_config_variant("nope", cfg, ident)
+
+
+def test_change_state_rc_and_ablation_variants():
+    from capwap_discovery_fuzzer.stage_fuzzer import build_change_state_variant
+    cfg, ident = _cfg(None), _golden_identity()
+    base = build_change_state_variant("base", cfg, ident)
+    assert _seq_of(base) == 2
+    for name, rc in (("rc-1", 1), ("rc-255", 255)):
+        msgs = parse_control_messages(build_change_state_variant(name, cfg, ident))
+        value = next(v for t, _l, v in msgs[0]["elements"] if t == 33)
+        assert int.from_bytes(value, "big") == rc
+    assert 33 not in _types(build_change_state_variant("omit-result", cfg, ident))
+    assert 32 not in _types(build_change_state_variant("omit-radio-op", cfg, ident))
+    assert 37 not in _types(build_change_state_variant("omit-vsp", cfg, ident))
+    assert _types(build_change_state_variant("dup-radio-op", cfg, ident)).count(32) == 3
 
 
 def test_round_plumbs_tuned_timeouts_into_transport(monkeypatch, tmp_path):

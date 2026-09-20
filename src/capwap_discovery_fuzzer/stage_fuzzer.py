@@ -50,6 +50,11 @@ from capwap_discovery_fuzzer.session.oracle import (
     RoundVerdict,
 )
 from capwap_discovery_fuzzer.session.transport import SClientTransport
+from capwap_discovery_fuzzer.session.vsp import (
+    VSP_ELEM_BOARD_DATA_OPTIONS,
+    VSP_ELEM_RAD_NAME,
+    VSP_ELEM_REG_DOMAIN,
+)
 from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity
 
 #: Board Data sub-element ids the controller's join parser expects
@@ -88,6 +93,10 @@ class JoinFuzzConfig:
     #: Extra AP identities to rotate over (plan P4.5).  Empty = single identity,
     #: which is the historical behaviour.
     identity_pool: tuple[ApIdentity, ...] = ()
+    #: Regulatory-domain code declared in Config Status (0x10 = -C China).
+    reg_domain_code: int = builders.DEFAULT_REG_DOMAIN_CODE
+    #: Seconds to wait for a Config Status / Change State response (P5).
+    stage_timeout: float = 5.0
 
     def identities(self) -> tuple[ApIdentity, ...]:
         return self.identity_pool or (self.identity,)
@@ -225,6 +234,188 @@ def build_unlocked_variant(cfg: JoinFuzzConfig, rng,
                                          "old_len": elen, "new_len": len(new)}
 
 
+def _hlen(raw: bytes) -> int:
+    return ((raw[1] >> 3) & 0x1F) * 4
+
+
+def _set_seq(raw: bytes, seq: int) -> bytes:
+    """Rewrite the Control_Header SeqNum (RFC 5415 §4.5.1.1, at hlen+4)."""
+    out = bytearray(raw)
+    out[_hlen(raw) + 4] = seq & 0xFF
+    return bytes(out)
+
+
+def _insert_after(raw: bytes, idx: int, value: bytes) -> bytes:
+    """Insert a copy of element ``idx`` carrying ``value`` right after it."""
+    elems = _element_offsets(raw)
+    etype, start, elen = elems[idx]
+    end = start + 4 + elen
+    body = raw[:end] + struct.pack(">HH", etype, len(value)) + value + raw[end:]
+    hlen = _hlen(raw)
+    out = bytearray(body)
+    out[hlen + 5:hlen + 7] = struct.pack(
+        ">H", int.from_bytes(raw[hlen + 5:hlen + 7], "big") + 4 + len(value))
+    return bytes(out)
+
+
+def _swap_elements(raw: bytes, i: int, j: int) -> bytes:
+    """Swap two elements' positions (order is significant in §8.x flows)."""
+    elems = _element_offsets(raw)
+    (ti, si, li), (tj, sj, lj) = elems[i], elems[j]
+    if si > sj:
+        return _swap_elements(raw, j, i)
+    head, mid_end = raw[:si], sj + 4 + lj
+    return (head + raw[sj:sj + 4 + lj] + raw[si + 4 + li:sj]
+            + raw[si:si + 4 + li] + raw[mid_end:])
+
+
+def _vsp_indices(raw: bytes, elem_id: int | None = None) -> list[int]:
+    """Indices of vendor-payload elements (Type 37), optionally by ElemID."""
+    out = []
+    for i, (etype, start, elen) in enumerate(_element_offsets(raw)):
+        if etype != 37 or elen < 6:
+            continue
+        value = raw[start + 4:start + 4 + elen]
+        if elem_id is None or int.from_bytes(value[4:6], "big") == elem_id:
+            out.append(i)
+    return out
+
+
+def _patch_vsp(raw: bytes, elem_id: int, transform) -> bytes:
+    """Apply ``transform(value)->value`` to every Type-37 element with ElemID."""
+    for i in _vsp_indices(raw, elem_id):
+        elems = _element_offsets(raw)
+        _t, start, elen = elems[i]
+        raw = _patch_element(raw, i, transform(raw[start + 4:start + 4 + elen]))
+    return raw
+
+
+#: Config Status variants.  ``base`` is the golden frame; the rest are single
+#: wire-level changes so a verdict difference attributes to that change.
+CONFIG_VARIANTS = [
+    "base",
+    "omit-4",             # AC Name (§8.2 MUST)
+    "omit-radio-admin",   # both Radio Administrative State (Type 31, MUST)
+    "omit-timer36",       # Statistics Timer (MUST)
+    "omit-reboot48",      # WTP Reboot Statistics (MUST)
+    "omit-radname",       # RAD_NAME vendor payload
+    "omit-vsp126",        # the two regulatory-domain declarations (E7's switch)
+    "vsp126-len7",        # 7-byte VSP header (E7's bug: ElemID parses as 0x0000)
+    "vsp126-elemid-0",    # ElemID -> 0x0000
+    "vsp126-elemid-207",  # ElemID -> 0x00cf (board options)
+    "vsp126-code-0",      # regulatory code 0x0000
+    "vsp126-code-ffff",   # regulatory code 0xffff
+    "dup-radio-admin",    # duplicated Type 31
+    "swap-first-two",     # element order swapped
+    "seq-old",            # SeqNum back to 0 -> §4.5.3 duplicate-sequence rule
+]
+
+#: Change State Event variants (same rules, §8.6 MUST set).
+CHANGE_STATE_VARIANTS = [
+    "base",
+    "omit-radio-op",      # Radio Operational State (Type 32, MUST)
+    "omit-result",        # Result Code (Type 33, MUST)
+    "rc-1",               # Result Code 1 (unsupported)
+    "rc-255",             # Result Code 255
+    "dup-radio-op",       # duplicated Type 32
+    "omit-vsp",           # drop both vendor payloads
+    "seq-old",            # SeqNum 0
+]
+
+
+def build_config_variant(name: str, cfg: JoinFuzzConfig, ident: ApIdentity,
+                         seq_num: int = 1) -> bytes:
+    """Configuration Status Request variant (RFC 5415 §8.2)."""
+    raw = builders.build_config_status(ident, seq_num=seq_num,
+                                       reg_domain_code=cfg.reg_domain_code)
+    if name == "base":
+        return raw
+    if name == "omit-4":
+        return _drop_type(raw, 4)
+    if name == "omit-radio-admin":
+        return _drop_type(raw, 31, all_=True)
+    if name == "omit-timer36":
+        return _drop_type(raw, 36)
+    if name == "omit-reboot48":
+        return _drop_type(raw, 48)
+    if name == "omit-radname":
+        return _patch_vsp(raw, VSP_ELEM_RAD_NAME, lambda _v: None)
+    if name == "omit-vsp126":
+        for i in reversed(_vsp_indices(raw, VSP_ELEM_REG_DOMAIN)):
+            raw = _patch_element(raw, i, None)
+        return raw
+    if name == "vsp126-len7":
+        return _patch_vsp(raw, VSP_ELEM_REG_DOMAIN, lambda v: v[:4] + b"\x00" + v[4:])
+    if name == "vsp126-elemid-0":
+        return _patch_vsp(raw, VSP_ELEM_REG_DOMAIN,
+                          lambda v: v[:4] + b"\x00\x00" + v[6:])
+    if name == "vsp126-elemid-207":
+        return _patch_vsp(raw, VSP_ELEM_REG_DOMAIN,
+                          lambda v: v[:4] + VSP_ELEM_BOARD_DATA_OPTIONS.to_bytes(2, "big") + v[6:])
+    if name == "vsp126-code-0":
+        return _patch_vsp(raw, VSP_ELEM_REG_DOMAIN,
+                          lambda v: v[:9] + b"\x00\x00")
+    if name == "vsp126-code-ffff":
+        return _patch_vsp(raw, VSP_ELEM_REG_DOMAIN,
+                          lambda v: v[:9] + b"\xff\xff")
+    if name == "dup-radio-admin":
+        return _insert_after(raw, _first_index(raw, 31),
+                             _element_value(raw, _first_index(raw, 31)))
+    if name == "swap-first-two":
+        return _swap_elements(raw, 0, 1)
+    if name == "seq-old":
+        return _set_seq(raw, 0)
+    raise ValueError(f"unknown config variant: {name}")
+
+
+def build_change_state_variant(name: str, cfg: JoinFuzzConfig, ident: ApIdentity,
+                               seq_num: int = 2) -> bytes:
+    """Change State Event Request variant (RFC 5415 §8.6)."""
+    raw = builders.build_change_state(ident, seq_num=seq_num)
+    if name == "base":
+        return raw
+    if name == "omit-radio-op":
+        return _drop_type(raw, 32, all_=True)
+    if name == "omit-result":
+        return _drop_type(raw, 33)
+    if name == "rc-1":
+        return _patch_element(raw, _first_index(raw, 33), struct.pack(">I", 1))
+    if name == "rc-255":
+        return _patch_element(raw, _first_index(raw, 33), struct.pack(">I", 255))
+    if name == "dup-radio-op":
+        return _insert_after(raw, _first_index(raw, 32),
+                             _element_value(raw, _first_index(raw, 32)))
+    if name == "omit-vsp":
+        for i in reversed(_vsp_indices(raw)):
+            raw = _patch_element(raw, i, None)
+        return raw
+    if name == "seq-old":
+        return _set_seq(raw, 0)
+    raise ValueError(f"unknown change-state variant: {name}")
+
+
+def _element_value(raw: bytes, idx: int) -> bytes:
+    _t, start, elen = _element_offsets(raw)[idx]
+    return raw[start + 4:start + 4 + elen]
+
+
+def _first_index(raw: bytes, etype: int) -> int:
+    for i, (t, _s, _l) in enumerate(_element_offsets(raw)):
+        if t == etype:
+            return i
+    raise ValueError(f"no element of type {etype}")
+
+
+def _drop_type(raw: bytes, etype: int, all_: bool = False) -> bytes:
+    """Drop the first (or all) elements of ``etype``."""
+    for i in reversed([i for i, (t, _s, _l) in enumerate(_element_offsets(raw))
+                       if t == etype]):
+        raw = _patch_element(raw, i, None)
+        if not all_:
+            break
+    return raw
+
+
 def _shorten_session_id(raw: bytes, size: int) -> bytes:
     """Shrink the Session ID element's value to ``size`` bytes (wire-level)."""
     for i, (etype, _start, _elen) in enumerate(_element_offsets(raw)):
@@ -309,22 +500,28 @@ class JoinStageFuzzer:
     # ------------------------------------------------------------------ rounds
 
     def run_round(self, variant: str, round_no: int,
-                  session_id: bytes | None = None) -> RoundVerdict:
+                  session_id: bytes | None = None,
+                  stage: str = "join") -> RoundVerdict:
         """One variant, up to ``config.retries + 1`` fresh sessions.
 
-        Each session can carry at most one Join Request; a non-ANSWERED
-        outcome is retried on a new session (new ephemeral source port)
-        because the controller's per-AP-MAC session cleanup makes roughly
-        every second attempt go silent regardless of the payload.
+        Each session carries at most one Join Request plus (for the later
+        stages) one mutated Config Status / Change State.  A round is retried
+        when the **join** leg is not answered — every stage needs a live
+        session — but never because the mutated stage message itself was
+        dropped: that *is* the measurement.
         """
         ident = self._identity_for(round_no)
         attempts = 0
         verdict = None
         while attempts <= self.cfg.retries:
             attempts += 1
-            verdict = self._attempt(variant, round_no, session_id, ident)
-            if verdict.outcome == Outcome.ANSWERED or \
-                    "transport_error" in verdict.mutation:
+            verdict = self._attempt(variant, round_no, session_id, ident, stage)
+            if "transport_error" in verdict.mutation:
+                break
+            if stage == "join":
+                if verdict.outcome == Outcome.ANSWERED:
+                    break
+            elif verdict.mutation.get("join_rc") == RESULT_CODE_SUCCESS:
                 break
         verdict.mutation["attempts"] = attempts
         return verdict
@@ -336,7 +533,8 @@ class JoinStageFuzzer:
 
     def _attempt(self, variant: str, round_no: int,
                  session_id: bytes | None = None,
-                 ident: ApIdentity | None = None) -> RoundVerdict:
+                 ident: ApIdentity | None = None,
+                 stage: str = "join") -> RoundVerdict:
         cfg = self.cfg
         ident = ident if ident is not None else cfg.identity
         discovery = self._discovery_bytes(ident) if cfg.discovery_prelude else b""
@@ -371,11 +569,30 @@ class JoinStageFuzzer:
                  "ap_mac": ident.ap_mac.hex()}
             if mut:
                 m.update(mut)
+            if stage != "join":
+                # the join leg is the envelope, not the measurement: record it
+                # so a failed envelope cannot be mistaken for a stage verdict
+                m["join_outcome"] = outcome.value
+                m["join_rc"] = code
+                if code == RESULT_CODE_SUCCESS:
+                    stage_raw = (build_config_variant(variant, cfg, ident)
+                                 if stage == "config"
+                                 else build_change_state_variant(variant, cfg, ident))
+                    want = 6 if stage == "config" else 12
+                    reply, outcome, code = self._stage_round(t, stage_raw, want)
+                    m["stage_rc"] = code
+                    if stage == "config":
+                        # survival probe: a config the AC accepted leaves the
+                        # session able to complete the Change State handshake
+                        _r, fut_outcome, fut_code = self._stage_round(
+                            t, builders.build_change_state(ident, seq_num=2), 12)
+                        m["survives"] = fut_outcome == Outcome.ANSWERED
+                        m["survives_rc"] = fut_code
             v = RoundVerdict(
-                stage="join", outcome=outcome, result_code=code,
+                stage=stage, outcome=outcome, result_code=code,
                 mutation=m, raw_reply_hex=reply.hex()[:256] if reply else None)
         except Exception as exc:  # noqa: BLE001 - transport failures are data
-            v = RoundVerdict(stage="join", outcome=Outcome.SILENCE,
+            v = RoundVerdict(stage=stage, outcome=Outcome.SILENCE,
                              mutation={"variant": variant, "round": round_no,
                                        "ap_mac": ident.ap_mac.hex(),
                                        "transport_error": str(exc)[:200]})
@@ -387,6 +604,24 @@ class JoinStageFuzzer:
             time.sleep(self.cfg.round_gap_s)
         return v
 
+    def _stage_round(self, t, frame: bytes, want_msg_type: int):
+        """Send one post-join frame and classify its response.
+
+        Returns ``(reply, outcome, result_code)`` where ``result_code`` comes
+        from the ``want_msg_type`` response's Result Code element (Type 33).
+        """
+        mark = t.snapshot()
+        t.send(frame)
+        reply = t.recv_since(mark, timeout=self.cfg.stage_timeout)
+        outcome, code = oracle.classify_reply(reply)
+        if outcome == Outcome.ANSWERED:
+            for msg in parse_control_messages(reply):
+                if msg["msg_type"] == want_msg_type:
+                    code = builders.result_code_of(msg)
+        if outcome == Outcome.SILENCE and not t.is_alive:
+            outcome = Outcome.ALERT
+        return reply, outcome, code
+
     def _discovery_bytes(self, ident: ApIdentity | None = None) -> bytes:
         """Discovery Request prelude (same 5-tuple as the DTLS session)."""
         from capwap_discovery_fuzzer.vendors.cisco.creator import CiscoPayloadCreator
@@ -394,7 +629,7 @@ class JoinStageFuzzer:
                      .create_discovery_request(valid=True))
 
     def run(self, variants: list[str], rounds_per_variant: int = 1,
-            progress=None) -> dict:
+            progress=None, stage: str = "join") -> dict:
         out: dict[str, dict] = {}
         round_no = 0
         for variant in variants:
@@ -402,7 +637,7 @@ class JoinStageFuzzer:
                      "codes": {}}
             for _ in range(rounds_per_variant):
                 round_no += 1
-                v = self.run_round(variant, round_no)
+                v = self.run_round(variant, round_no, stage=stage)
                 rec = {"round": round_no, "ts": time.time(), **v.as_dict()}
                 self.records.append(rec)
                 key = v.outcome.value
@@ -452,8 +687,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--variants", default="base",
                     help="comma list, 'all' for the full matrix, or 'unlocked' "
                          "for the random open-element baseline")
-    ap.add_argument("--stage", default="join", choices=["join"],
-                    help="fuzzing stage (only join is implemented in P4)")
+    ap.add_argument("--stage", default="join",
+                    choices=["join", "config", "change-state"],
+                    help="fuzzing stage: the join variants (P4), or a mutated "
+                         "Configuration Status (§8.2) / Change State (§8.6) sent "
+                         "inside a session that joined first (P5)")
     ap.add_argument("--seed", type=int, default=None,
                     help="RNG seed for the unlocked mode (recorded in summary)")
     ap.add_argument("--rounds", type=int, default=None,
@@ -463,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds between rounds; the controller keeps a "
                          "joined session for a while and drops the next join "
                          "until its cleanup settles")
+    ap.add_argument("--stage-timeout", type=float, default=5.0,
+                    help="seconds to wait for a Config Status / Change State response")
     ap.add_argument("--join-timeout", type=float, default=3.0,
                     help="seconds to wait for the Join Response (a successful "
                          "join answers within ~100 ms; the old 15 s cap was dead "
@@ -485,7 +725,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.rounds is not None:
         args.rounds_per_variant = args.rounds
 
-    variants = ALL_VARIANTS if args.variants == "all" else \
+    all_for_stage = {"join": ALL_VARIANTS, "config": CONFIG_VARIANTS,
+                     "change-state": CHANGE_STATE_VARIANTS}[args.stage]
+    variants = all_for_stage if args.variants == "all" else \
         [v.strip() for v in args.variants.split(",") if v.strip()]
 
     identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
@@ -503,7 +745,9 @@ def main(argv: list[str] | None = None) -> int:
                          identity=identity, out_dir=out_dir,
                          local_ip=args.local_ip, round_gap_s=args.round_gap,
                          join_timeout=args.join_timeout, handshake_settle=args.settle,
-                         close_wait=args.close_wait, identity_pool=pool)
+                         close_wait=args.close_wait, identity_pool=pool,
+                         reg_domain_code=args.regdom_config,
+                         stage_timeout=args.stage_timeout)
     fuzzer = JoinStageFuzzer(cfg, openssl_bin=args.openssl, seed=args.seed)
 
     def progress(round_no: int, variant: str, v: RoundVerdict) -> None:
@@ -511,13 +755,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{round_no:3d}] {variant:20s} {v.outcome.value}{extra}",
               flush=True)
 
-    summary = fuzzer.run(variants, args.rounds_per_variant, progress=progress)
+    summary = fuzzer.run(variants, args.rounds_per_variant, progress=progress,
+                          stage=args.stage)
     fuzzer.write_jsonl(out_dir / "session.jsonl")
     (out_dir / "summary.json").write_text(
-        json.dumps({"variants": variants,
+        json.dumps({"stage": args.stage,
+                    "variants": variants,
                     "rounds_per_variant": args.rounds_per_variant,
                     "seed": args.seed,
                     "round_gap_s": args.round_gap,
+                    "stage_timeout_s": args.stage_timeout,
                     "join_timeout_s": args.join_timeout,
                     "handshake_settle_s": args.settle,
                     "close_wait_s": args.close_wait,

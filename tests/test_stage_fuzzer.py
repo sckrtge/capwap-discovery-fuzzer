@@ -292,6 +292,60 @@ def test_change_state_rc_and_ablation_variants():
     assert _types(build_change_state_variant("dup-radio-op", cfg, ident)).count(32) == 3
 
 
+def test_stage_round_joins_with_base_then_sends_the_stage_variant(monkeypatch, tmp_path):
+    """A config/change-state round must join with `base`, not with the variant."""
+    import capwap_discovery_fuzzer.stage_fuzzer as sf
+    sent: list[bytes] = []
+
+    # real Join Response captured from C9800-fresh 17.14.01 (Result Code 0);
+    # its envelope is enough for the config leg to be reached
+    join_response = bytes.fromhex(
+        "0010000000000000000000040000730000210004000000000001001800002710000003e802"
+        "0100020040960000010004110e004f0004000943393830302d4c414204180005000000000e"
+        "000a0006c0a80ac90000001d000214000025000f0040960000d70553000505540001000025"
+        "000f0040960000d708a800050001000100")
+
+    class _FakeTransport:
+        def __init__(self, ac_addr, **kw):
+            pass
+
+        def connect(self, timeout=25.0):
+            pass
+
+        def wait_handshake(self, timeout=25.0):
+            pass
+
+        def snapshot(self):
+            return len(sent)
+
+        def send(self, data):
+            sent.append(data)
+
+        def recv_since(self, mark, timeout=3.0):
+            return join_response
+
+        @property
+        def is_alive(self):
+            return True
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "SClientTransport", _FakeTransport)
+    cfg = JoinFuzzConfig(ac_addr=AC, cert_path="c.pem", key_path="k.pem",
+                         identity=_golden_identity(), out_dir=tmp_path,
+                         retries=0, round_gap_s=0.0, discovery_prelude=False)
+    ident = _golden_identity()
+    verdict = sf.JoinStageFuzzer(cfg)._attempt("omit-4", 1, None, ident, "config")
+    # join (golden) + the mutated config + the Change State survival probe
+    assert [parse_control_messages(f)[0]["msg_type"] for f in sent] == [3, 5, 11]
+    assert sent[0][:12] == build_variant("base", cfg, bytes(16),
+                                         identity=ident)[:12]
+    assert 4 not in _types(sent[1])             # the omit-4 variant really applied
+    assert verdict.mutation["join_rc"] == 0     # envelope recorded separately
+    assert verdict.mutation["variant"] == "omit-4"
+
+
 def test_round_plumbs_tuned_timeouts_into_transport(monkeypatch, tmp_path):
     """Round timings come from the config, not from module constants."""
     import capwap_discovery_fuzzer.stage_fuzzer as sf

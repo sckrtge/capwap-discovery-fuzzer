@@ -557,11 +557,14 @@ class JoinStageFuzzer:
             t.connect(timeout=cfg.connect_timeout)
             t.wait_handshake(timeout=cfg.connect_timeout)
             mark = t.snapshot()          # ignore handshake-flight bytes
-            if variant == "unlocked":
+            # the variant name space belongs to the stage under test: a
+            # config/change-state round always joins with the golden frame
+            if stage == "join" and variant == "unlocked":
                 raw, mut = build_unlocked_variant(cfg, self._rng, session_id=session_id,
                                                   identity=ident)
             else:
-                raw, mut = build_variant(variant, cfg, session_id=session_id,
+                join_variant = variant if stage == "join" else "base"
+                raw, mut = build_variant(join_variant, cfg, session_id=session_id,
                                          identity=ident), None
             t.send(raw)
             reply = t.recv_since(mark, timeout=cfg.join_timeout)

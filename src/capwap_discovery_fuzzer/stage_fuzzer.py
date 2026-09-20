@@ -95,6 +95,94 @@ def _shift_board_subelem_types(board: bytes, delta: int = 1) -> bytes:
     return bytes(out)
 
 
+def _element_offsets(raw: bytes) -> list[tuple[int, int, int]]:
+    """Return ``(elem_type, elem_start, value_len)`` for each element of one frame."""
+    hlen = ((raw[1] >> 3) & 0x1F) * 4
+    out: list[tuple[int, int, int]] = []
+    o = hlen + 8
+    while o + 4 <= len(raw):
+        etype = int.from_bytes(raw[o:o + 2], "big")
+        elen = int.from_bytes(raw[o + 2:o + 4], "big")
+        if o + 4 + elen > len(raw):
+            break
+        out.append((etype, o, elen))
+        o += 4 + elen
+    return out
+
+
+def _patch_element(raw: bytes, elem_index: int, new_value: bytes | None) -> bytes:
+    """Replace (or drop, when ``new_value is None``) one element; fix lengths.
+
+    Adjusts the element's Length field and the Control_Header MsgElemsLen
+    (RFC 5415 §4.5.1.1 counts from after SeqNum: 2B length field + 1B flags +
+    element bytes).
+    """
+    hlen = ((raw[1] >> 3) & 0x1F) * 4
+    elems = _element_offsets(raw)
+    etype, start, elen = elems[elem_index]
+    end = start + 4 + elen
+    if new_value is None:
+        body = raw[:start] + raw[end:]
+    else:
+        body = (raw[:start] + struct.pack(">HH", etype, len(new_value)) + new_value
+                + raw[end:])
+    # Control_Header: MsgType(4) SeqNum(1) MsgElemsLen(2) Flags(1)
+    old_elems_len = int.from_bytes(raw[hlen + 5:hlen + 7], "big")
+    delta = len(body) - len(raw)
+    new_elems_len = old_elems_len + delta
+    out = bytearray(body)
+    out[hlen + 5:hlen + 7] = struct.pack(">H", new_elems_len)
+    return bytes(out)
+
+
+#: Element types the plan's join lock set v1 freezes (DTLS-required identity);
+#: everything else is open to the unlocked baseline's random mutation.
+LOCKED_ELEMENT_TYPES = frozenset({38, 35, 29, 1048})
+
+
+def build_unlocked_variant(cfg: JoinFuzzConfig, rng,
+                           session_id: bytes | None = None) -> tuple[bytes, dict]:
+    """One random mutation of one *open* (non-frozen) element.
+
+    Realises the plan's "未锁定对照": frozen identity elements stay byte-exact,
+    everything else gets one of: value byte-flip / value zero-fill / value
+    truncation / element drop.  Returns ``(frame, mutation_descriptor)``.
+    """
+    raw = build_variant("base", cfg, session_id=session_id)
+    elems = _element_offsets(raw)
+    open_idx = [i for i, (t, _s, _l) in enumerate(elems)
+                if t not in LOCKED_ELEMENT_TYPES]
+    i = rng.choice(open_idx)
+    etype, start, elen = elems[i]
+    value = raw[start + 4:start + 4 + elen]
+    op = rng.choice(["flip", "zero", "truncate", "drop"])
+    if op == "drop":
+        return _patch_element(raw, i, None), {"op": "drop", "type": etype}
+    if op == "truncate" and elen > 1:
+        k = rng.randrange(1, elen)
+        new = value[:k]
+    elif op == "zero":
+        new = bytes(elen)
+    else:
+        new = bytearray(value)
+        if elen:
+            pos = rng.randrange(elen)
+            new[pos] ^= 1 << rng.randrange(8)
+        new = bytes(new)
+    return _patch_element(raw, i, new), {"op": op, "type": etype,
+                                         "old_len": elen, "new_len": len(new)}
+
+
+def _shorten_session_id(raw: bytes, size: int) -> bytes:
+    """Shrink the Session ID element's value to ``size`` bytes (wire-level)."""
+    for i, (etype, _start, _elen) in enumerate(_element_offsets(raw)):
+        if etype == 35:
+            cur = _element_offsets(raw)[i]
+            value = raw[cur[1] + 4:cur[1] + 4 + cur[2]][:size]
+            return _patch_element(raw, i, value)
+    raise ValueError("no Session ID element to shorten")
+
+
 def build_variant(name: str, cfg: JoinFuzzConfig,
                   session_id: bytes | None = None) -> bytes:
     """Build one Join Request for the named variant (defaults = ``base``)."""
@@ -104,6 +192,11 @@ def build_variant(name: str, cfg: JoinFuzzConfig,
 
     if name == "base":
         pass
+    elif name == "session-zero":
+        kwargs["session_id"] = bytes(16)
+    elif name == "session-short8":
+        raw = builders.build_join_request(**kwargs)
+        return _shorten_session_id(raw, 8)
     elif name == "omit-126":
         kwargs["reg_domain_code"] = None
     elif name == "omit-169":
@@ -148,9 +241,13 @@ Verdict = RoundVerdict
 class JoinStageFuzzer:
     """Run join-variant rounds over fresh DTLS sessions."""
 
-    def __init__(self, cfg: JoinFuzzConfig, openssl_bin: str = "openssl"):
+    def __init__(self, cfg: JoinFuzzConfig, openssl_bin: str = "openssl",
+                 seed: int | None = None):
+        import random
         self.cfg = cfg
         self.openssl_bin = openssl_bin
+        self.seed = seed
+        self._rng = random.Random(seed)
         self.records: list[dict] = []
 
     # ------------------------------------------------------------------ rounds
@@ -187,7 +284,10 @@ class JoinStageFuzzer:
             t.connect(timeout=cfg.connect_timeout)
             t.wait_handshake(timeout=cfg.connect_timeout)
             mark = t.snapshot()          # ignore handshake-flight bytes
-            raw = build_variant(variant, cfg, session_id=session_id)
+            if variant == "unlocked":
+                raw, mut = build_unlocked_variant(cfg, self._rng, session_id=session_id)
+            else:
+                raw, mut = build_variant(variant, cfg, session_id=session_id), None
             t.send(raw)
             reply = t.recv_since(mark, timeout=TIMEOUT_JOIN_RESPONSE)
             outcome, code = oracle.classify_reply(reply)
@@ -199,10 +299,12 @@ class JoinStageFuzzer:
                 for m in parse_control_messages(reply):
                     if m["msg_type"] == 4:
                         code = builders.result_code_of(m)
+            m = {"variant": variant, "round": round_no}
+            if mut:
+                m.update(mut)
             v = RoundVerdict(
                 stage="join", outcome=outcome, result_code=code,
-                mutation={"variant": variant, "round": round_no},
-                raw_reply_hex=reply.hex()[:256] if reply else None)
+                mutation=m, raw_reply_hex=reply.hex()[:256] if reply else None)
         except Exception as exc:  # noqa: BLE001 - transport failures are data
             v = RoundVerdict(stage="join", outcome=Outcome.SILENCE,
                              mutation={"variant": variant, "round": round_no,
@@ -258,6 +360,7 @@ ALL_VARIANTS = [
     "base", "omit-126", "omit-169", "omit-37", "omit-29", "omit-53", "omit-30",
     "maxmsglen-0", "maxmsglen-65535", "radio-1base", "radio-type-b-a",
     "regdom-code-0", "regdom-code-FFFF", "boarddata-shift",
+    "session-zero", "session-short8",
 ]
 
 
@@ -276,7 +379,14 @@ def main(argv: list[str] | None = None) -> int:
                     default=builders.DEFAULT_REG_DOMAIN_CODE,
                     help="code declared in Config Status (0x10 = -C China)")
     ap.add_argument("--variants", default="base",
-                    help="comma list, or 'all' for the full matrix")
+                    help="comma list, 'all' for the full matrix, or 'unlocked' "
+                         "for the random open-element baseline")
+    ap.add_argument("--stage", default="join", choices=["join"],
+                    help="fuzzing stage (only join is implemented in P4)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="RNG seed for the unlocked mode (recorded in summary)")
+    ap.add_argument("--rounds", type=int, default=None,
+                    help="alias for --rounds-per-variant")
     ap.add_argument("--rounds-per-variant", type=int, default=1)
     ap.add_argument("--round-gap", type=float, default=1.0,
                     help="seconds between rounds; the controller keeps a "
@@ -285,6 +395,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--openssl", default="openssl")
     args = ap.parse_args(argv)
+
+    if args.rounds is not None:
+        args.rounds_per_variant = args.rounds
 
     variants = ALL_VARIANTS if args.variants == "all" else \
         [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -297,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                          cert_path=args.cert, key_path=args.key,
                          identity=identity, out_dir=out_dir,
                          local_ip=args.local_ip, round_gap_s=args.round_gap)
-    fuzzer = JoinStageFuzzer(cfg, openssl_bin=args.openssl)
+    fuzzer = JoinStageFuzzer(cfg, openssl_bin=args.openssl, seed=args.seed)
 
     def progress(round_no: int, variant: str, v: RoundVerdict) -> None:
         extra = f" rc={v.result_code}" if v.result_code is not None else ""
@@ -309,6 +422,10 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / "summary.json").write_text(
         json.dumps({"variants": variants,
                     "rounds_per_variant": args.rounds_per_variant,
+                    "seed": args.seed,
+                    "round_gap_s": args.round_gap,
+                    "model": args.model,
+                    "ac_ip": args.ac_ip,
                     "summary": summary}, ensure_ascii=False, indent=2),
         encoding="utf-8")
     print(json.dumps(summary, indent=2))

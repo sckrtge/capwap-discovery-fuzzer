@@ -24,6 +24,7 @@ KNOWN_VARIANTS = [
     "base", "omit-126", "omit-169", "omit-37", "omit-29", "omit-53", "omit-30",
     "maxmsglen-0", "maxmsglen-65535", "radio-1base", "radio-type-b-a",
     "regdom-code-0", "regdom-code-FFFF", "boarddata-shift",
+    "session-zero", "session-short8",
 ]
 
 
@@ -87,3 +88,30 @@ def test_boarddata_shift_moves_subelem_types():
 def test_unknown_variant_rejected():
     with pytest.raises(ValueError):
         build_variant("no-such-variant", _cfg(None), bytes(16))
+
+
+def test_session_variants_roundtrip():
+    cfg = _cfg(None)
+    for name in ("session-zero", "session-short8"):
+        msgs = parse_control_messages(build_variant(name, cfg, bytes(16)))
+        assert len(msgs) == 1 and msgs[0]["msg_type"] == 3, name
+    # session-short8 really shrinks the element value to 8 bytes
+    msgs = parse_control_messages(build_variant("session-short8", cfg, bytes(16)))
+    sid = next(v for t, _l, v in msgs[0]["elements"] if t == 35)
+    assert len(sid) == 8
+
+
+def test_unlocked_mutates_only_open_elements():
+    import random
+    from capwap_discovery_fuzzer.stage_fuzzer import (
+        LOCKED_ELEMENT_TYPES, build_unlocked_variant)
+    cfg = _cfg(None)
+    rng = random.Random(7)
+    for _ in range(50):
+        raw, mut = build_unlocked_variant(cfg, rng, session_id=bytes(16))
+        assert mut["type"] not in LOCKED_ELEMENT_TYPES
+        msgs = parse_control_messages(raw)
+        assert len(msgs) == 1 and msgs[0]["msg_type"] == 3
+        # frozen identity elements stay present in every unlocked round
+        types = [t for t, _l, _v in msgs[0]["elements"]]
+        assert 38 in types and 35 in types and 29 in types

@@ -122,15 +122,24 @@ class SClientTransport(DTLSTransport):
         self.proxy_port = self._proxy.getsockname()[1]
         self._proxy.settimeout(0.2)
         # the WLC-facing socket doubles as the discovery-prelude sender: the
-        # prelude MUST share the DTLS session's 5-tuple (E2/E5 live flow)
+        # prelude MUST share the DTLS session's 5-tuple, and its response MUST
+        # be consumed here — the documented flow (e2_join_chain) waits for the
+        # reply before starting the DTLS client; otherwise the stale reply is
+        # forwarded to s_client as bogus record data
         self._wsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._wsock.bind(("0.0.0.0", self.wlc_port))
         if self.prelude:
+            self._wsock.settimeout(3.0)
             try:
                 self._wsock.sendto(self.prelude, self.ac_addr)
+                self._wsock.recvfrom(4096)          # Discovery Response — discard
+            except socket.timeout:
+                self.close()
+                raise TransportError("no Discovery Response (controller down?)")
             except OSError:
                 pass
-            time.sleep(0.3)
+            finally:
+                self._wsock.settimeout(0.2)
 
         # NOTE: no -ign_eof — on close() we end stdin so OpenSSL sends a
         # close_notify, releasing the session on the controller.  Without it,

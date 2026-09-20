@@ -40,6 +40,14 @@ MSG_DISCOVERY_REQUEST = 1
 MSG_DISCOVERY_RESPONSE = 2
 MSG_JOIN_REQUEST = 3
 MSG_JOIN_RESPONSE = 4
+MSG_CONFIG_STATUS_REQUEST = 5
+MSG_CONFIG_STATUS_RESPONSE = 6
+MSG_CONFIG_UPDATE_REQUEST = 7
+MSG_CONFIG_UPDATE_RESPONSE = 8
+MSG_CHANGE_STATE_EVENT_REQUEST = 11
+MSG_CHANGE_STATE_EVENT_RESPONSE = 12
+MSG_ECHO_REQUEST = 13
+MSG_ECHO_RESPONSE = 14
 MSG_PRIMARY_DISCOVERY_REQUEST = 19
 MSG_PRIMARY_DISCOVERY_RESPONSE = 20
 
@@ -48,6 +56,14 @@ MSG_NAMES = {
     MSG_DISCOVERY_RESPONSE: "Discovery Response",
     MSG_JOIN_REQUEST: "Join Request",
     MSG_JOIN_RESPONSE: "Join Response",
+    MSG_CONFIG_STATUS_REQUEST: "Configuration Status Request",
+    MSG_CONFIG_STATUS_RESPONSE: "Configuration Status Response",
+    MSG_CONFIG_UPDATE_REQUEST: "Configuration Update Request",
+    MSG_CONFIG_UPDATE_RESPONSE: "Configuration Update Response",
+    MSG_CHANGE_STATE_EVENT_REQUEST: "Change State Event Request",
+    MSG_CHANGE_STATE_EVENT_RESPONSE: "Change State Event Response",
+    MSG_ECHO_REQUEST: "Echo Request",
+    MSG_ECHO_RESPONSE: "Echo Response",
     MSG_PRIMARY_DISCOVERY_REQUEST: "Primary Discovery Request",
     MSG_PRIMARY_DISCOVERY_RESPONSE: "Primary Discovery Response",
 }
@@ -66,6 +82,10 @@ ELEM_DISCOVERY_TYPE = 20            # §4.6.21
 ELEM_LOCATION_DATA = 28             # §4.6.30
 ELEM_RESULT_CODE = 33               # §4.6.35
 ELEM_VENDOR_SPECIFIC_PAYLOAD = 37   # §4.6.39
+ELEM_RADIO_ADMIN_STATE = 31         # §4.6.33 (Type 31)
+ELEM_RADIO_OPER_STATE = 32          # §4.6.34 (Type 32)
+ELEM_STATISTICS_TIMER = 36          # §4.6.38 (Type 36)
+ELEM_RETURNED_MESSAGE_ELEMENT = 34  # §4.6.36 (Type 34)
 ELEM_WTP_BOARD_DATA = 38            # §4.6.40
 ELEM_WTP_DESCRIPTOR = 39            # §4.6.41
 ELEM_WTP_FRAME_TUNNEL_MODE = 41     # §4.6.43
@@ -93,6 +113,10 @@ ELEMENT_NAMES = {
     ELEM_DISCOVERY_TYPE: "Discovery Type",
     ELEM_LOCATION_DATA: "Location Data",
     ELEM_RESULT_CODE: "Result Code",
+    ELEM_RADIO_ADMIN_STATE: "Radio Administrative State",
+    ELEM_RADIO_OPER_STATE: "Radio Operational State",
+    ELEM_STATISTICS_TIMER: "Statistics Timer",
+    ELEM_RETURNED_MESSAGE_ELEMENT: "Returned Message Element",
     ELEM_VENDOR_SPECIFIC_PAYLOAD: "Vendor Specific Payload",
     ELEM_WTP_BOARD_DATA: "WTP Board Data",
     ELEM_WTP_DESCRIPTOR: "WTP Descriptor",
@@ -180,6 +204,27 @@ _STAGE_RULES = {
     MSG_PRIMARY_DISCOVERY_RESPONSE: (_RESPONSE_MUST, _RESPONSE_MAY, _RESPONSE_ONE_OF),
     MSG_JOIN_REQUEST: (_JOIN_REQUEST_MUST, _JOIN_REQUEST_MAY, _JOIN_REQUEST_ONE_OF),
     MSG_JOIN_RESPONSE: (_JOIN_RESPONSE_MUST, _JOIN_RESPONSE_MAY, _JOIN_RESPONSE_ONE_OF),
+    # §8.2: AC Name, Radio Administrative State, Statistics Timer, WTP Reboot
+    # Statistics are MUST; the RFC 5416 binding adds per-radio 802.11 elements
+    # (not modelled here — the base-protocol set below is what every vendor emits).
+    MSG_CONFIG_STATUS_REQUEST: (
+        (ELEM_AC_NAME, ELEM_RADIO_ADMIN_STATE, ELEM_STATISTICS_TIMER,
+         ELEM_WTP_REBOOT_STATISTICS),
+        (ELEM_AC_NAME_WITH_PRIORITY, ELEM_CAPWAP_TRANSPORT_PROTOCOL,
+         ELEM_VENDOR_SPECIFIC_PAYLOAD),
+        ()),
+    # §8.6: Radio Operational State + Result Code are MUST; Returned Message
+    # Element(s) and VSP are MAY.
+    MSG_CHANGE_STATE_EVENT_REQUEST: (
+        (ELEM_RADIO_OPER_STATE, ELEM_RESULT_CODE),
+        (ELEM_RETURNED_MESSAGE_ELEMENT, ELEM_VENDOR_SPECIFIC_PAYLOAD),
+        ()),
+    # §7.1/§7.2: Echo messages carry no mandatory elements.
+    MSG_ECHO_REQUEST: ((), (), ()),
+    MSG_ECHO_RESPONSE: ((), (), ()),
+    # §8.5: the acknowledgement "indicates the result" (§8.4 wording) but the
+    # RFC defines no MUST element list for it; keep permissive with a note.
+    MSG_CONFIG_UPDATE_RESPONSE: ((), (ELEM_RESULT_CODE,), ()),
 }
 
 # Result Code enum, RFC 5415 §4.6.35 — the only admission verdict CAPWAP carries,

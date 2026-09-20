@@ -93,6 +93,26 @@ class JoinFuzzConfig:
         return self.identity_pool or (self.identity,)
 
 
+def derive_identity(base: ApIdentity, mac: bytes,
+                    serial_suffix: str = "") -> ApIdentity:
+    """Copy ``base`` with the identity fields replaced by ``mac``.
+
+    Only what makes an AP identifiable moves — the CAPWAP optional Radio MAC,
+    the board-data base MAC, the WTP name (``APxxxx.xxxx.xxxx``) and an
+    optional serial suffix.
+    """
+    hexs = mac.hex().upper().encode()
+    serial = base.serial
+    if serial_suffix:
+        serial = (base.serial[:-len(serial_suffix)] + serial_suffix.encode())
+    return ApIdentity(
+        ap_name=b"AP" + hexs[0:4] + b"." + hexs[4:8] + b"." + hexs[8:12],
+        ap_mac=mac, model=base.model, serial=serial, base_mac=mac,
+        radios=base.radios, max_radios=base.max_radios,
+        radios_in_use=base.radios_in_use, num_encrypt=base.num_encrypt,
+        msg_type=base.msg_type)
+
+
 def build_identity_pool(base: ApIdentity, count: int) -> tuple[ApIdentity, ...]:
     """``count`` distinct AP identities derived from ``base`` (plan P4.5).
 
@@ -107,15 +127,7 @@ def build_identity_pool(base: ApIdentity, count: int) -> tuple[ApIdentity, ...]:
     for i in range(1, count):
         mac = bytearray(base.ap_mac)
         mac[-1] = (mac[-1] + i) % 256
-        mac_b = bytes(mac)
-        hexs = mac_b.hex().upper().encode()
-        name = b"AP" + hexs[0:4] + b"." + hexs[4:8] + b"." + hexs[8:12]
-        serial = base.serial[:-2] + f"{i:02d}".encode()
-        pool.append(ApIdentity(
-            ap_name=name, ap_mac=mac_b, model=base.model, serial=serial,
-            base_mac=mac_b, radios=base.radios, max_radios=base.max_radios,
-            radios_in_use=base.radios_in_use, num_encrypt=base.num_encrypt,
-            msg_type=base.msg_type))
+        pool.append(derive_identity(base, bytes(mac), serial_suffix=f"{i:02d}"))
     return tuple(pool)
 
 
@@ -462,6 +474,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--identity-pool", type=int, default=1,
                     help="rotate over N derived AP identities (plan P4.5); "
                          "1 = single identity (default, historical behaviour)")
+    ap.add_argument("--identity-base-mac", default=None,
+                    help="hex MAC the pool starts from (e.g. 10a829927000). "
+                         "Use it to test identities the controller has never "
+                         "seen — the default AP MAC has history by then")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--openssl", default="openssl")
     args = ap.parse_args(argv)
@@ -474,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
 
     identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
                           model=args.model.encode())
+    if args.identity_base_mac:
+        mac = bytes.fromhex(args.identity_base_mac)
+        if len(mac) != 6:
+            raise SystemExit("--identity-base-mac must be a 6-byte hex MAC")
+        identity = derive_identity(identity, mac)
     pool = build_identity_pool(identity, args.identity_pool)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -98,10 +98,12 @@ def _control_frame(identity: ApIdentity, msg_type: int, seq_num: int,
 
 
 def build_join_request(identity: ApIdentity, session_id: bytes = bytes(16),
-                       local_ip: str = "192.168.10.128", seq_num: int = 0,
-                       max_message_length: int = DEFAULT_MAX_MESSAGE_LENGTH,
-                       reg_domain_code: int = 0x0101,
+                       local_ip: str | None = "192.168.10.128", seq_num: int = 0,
+                       max_message_length: int | None = DEFAULT_MAX_MESSAGE_LENGTH,
+                       reg_domain_code: int | None = 0x0101,
                        ap_domain_name: bytes | None = DEFAULT_AP_DOMAIN_NAME,
+                       omit_vsp: bool = False, omit_ecn: bool = False,
+                       board_data_override: bytes | None = None,
                        ) -> bytes:
     """Join Request (RFC 5415 §6.1) with the C9800-required Cisco extensions.
 
@@ -110,30 +112,42 @@ def build_join_request(identity: ApIdentity, session_id: bytes = bytes(16),
     ``reg_domain_code`` is the raw join-time Type-126 declaration (two code
     bytes; the accepted capture carries 0x0101 — the *enforced* codes live in
     the Configuration Status vendor payloads, see :func:`build_config_status`).
+
+    Mutation hooks (used by the join-stage fuzzer, all default to the golden
+    behaviour): pass ``None`` for ``local_ip`` / ``max_message_length`` /
+    ``reg_domain_code`` / ``ap_domain_name`` to omit the corresponding
+    element(s); ``omit_vsp``/``omit_ecn`` drop those elements;
+    ``board_data_override`` replaces the Type-38 value.
     """
     if len(session_id) != 16:
         raise ValueError(f"Session ID must be 16B (RFC 5415 §4.6.37), got {len(session_id)}")
 
-    code = reg_domain_code.to_bytes(2, "big")
+    code = reg_domain_code.to_bytes(2, "big") if reg_domain_code is not None else None
     parts = [
-        _element(38, identity.board_data()),
+        _element(38, board_data_override if board_data_override is not None
+                 else identity.board_data()),
         _element(39, identity.descriptor()),
         _element(41, b"\x04"),
         _element(44, b"\x01"),
         _element(45, identity.ap_name),
         _element(28, b"default location"),
-        # Cisco Type 126, 5-byte form {band, set, slot, code0, code1}, one per band
-        _element(126, bytes([0x00, 0x01, 0x00]) + code),
-        _element(126, bytes([0x01, 0x01, 0x01]) + code),
     ]
+    if code is not None:
+        # Cisco Type 126, 5-byte form {band, set, slot, code0, code1}, one per band
+        parts.append(_element(126, bytes([0x00, 0x01, 0x00]) + code))
+        parts.append(_element(126, bytes([0x01, 0x01, 0x01]) + code))
     parts.extend(_element(1048, _radio_information(rid, rtype))
                  for rid, rtype in identity.radios)
     parts.append(_element(35, session_id))
-    parts.append(_element(29, struct.pack(">H", max_message_length)))
-    parts.append(_element(53, b"\x00"))                       # Limited ECN (§4.6.25)
-    parts.append(_element(30, _ipv4(local_ip)))               # §4.6.11 one-of
-    parts.append(_element(37, _vsp_value(BOARD_DATA_OPTIONS_ELEM_ID, _VSP207_DATA)))
-    parts.append(_element(37, _vsp_value(RAD_NAME_ELEM_ID, identity.ap_name)))
+    if max_message_length is not None:
+        parts.append(_element(29, struct.pack(">H", max_message_length)))
+    if not omit_ecn:
+        parts.append(_element(53, b"\x00"))                   # Limited ECN (§4.6.25)
+    if local_ip is not None:
+        parts.append(_element(30, _ipv4(local_ip)))           # §4.6.11 one-of
+    if not omit_vsp:
+        parts.append(_element(37, _vsp_value(BOARD_DATA_OPTIONS_ELEM_ID, _VSP207_DATA)))
+        parts.append(_element(37, _vsp_value(RAD_NAME_ELEM_ID, identity.ap_name)))
     if ap_domain_name is not None:
         parts.append(_element(169, bytes([0x01])
                               + len(ap_domain_name).to_bytes(2, "big") + ap_domain_name))

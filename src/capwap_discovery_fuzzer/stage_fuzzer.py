@@ -35,12 +35,14 @@ is killed between rounds (orphaned clients poison later sessions).
 from __future__ import annotations
 
 import json
+import secrets
 import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from capwap_discovery_fuzzer.session import builders
+from capwap_discovery_fuzzer.session import oracle
 from capwap_discovery_fuzzer.session.builders import parse_control_messages
 from capwap_discovery_fuzzer.session.oracle import (
     RESULT_CODE_SUCCESS,
@@ -68,6 +70,14 @@ class JoinFuzzConfig:
     local_ip: str = "192.168.10.128"
     connect_timeout: float = 25.0
     round_gap_s: float = 1.0
+    #: extra attempts on a fresh session when a round ends non-ANSWERED.  The
+    #: controller keeps the previous joined session bound to the AP MAC and
+    #: drops the next join until its cleanup settles, which shows up as a
+    #: strict one-out-of-two alternation across ephemeral source ports
+    #: (measured 2026-09-20).  Retrying on a fresh port removes that flake
+    #: without changing the variant under test.
+    retries: int = 1
+    discovery_prelude: bool = True
 
 
 def _shift_board_subelem_types(board: bytes, delta: int = 1) -> bytes:
@@ -147,26 +157,48 @@ class JoinStageFuzzer:
 
     def run_round(self, variant: str, round_no: int,
                   session_id: bytes | None = None) -> RoundVerdict:
+        """One variant, up to ``config.retries + 1`` fresh sessions.
+
+        Each session can carry at most one Join Request; a non-ANSWERED
+        outcome is retried on a new session (new ephemeral source port)
+        because the controller's per-AP-MAC session cleanup makes roughly
+        every second attempt go silent regardless of the payload.
+        """
+        attempts = 0
+        verdict = None
+        while attempts <= self.cfg.retries:
+            attempts += 1
+            verdict = self._attempt(variant, round_no, session_id)
+            if verdict.outcome == Outcome.ANSWERED or \
+                    "transport_error" in verdict.mutation:
+                break
+        verdict.mutation["attempts"] = attempts
+        return verdict
+
+    def _attempt(self, variant: str, round_no: int,
+                 session_id: bytes | None = None) -> RoundVerdict:
         cfg = self.cfg
+        discovery = self._discovery_bytes() if cfg.discovery_prelude else b""
         t = SClientTransport(cfg.ac_addr, cert_path=cfg.cert_path,
-                             key_path=cfg.key_path, openssl_bin=self.openssl_bin)
+                             key_path=cfg.key_path, openssl_bin=self.openssl_bin,
+                             prelude=discovery)
         v = None
         try:
             t.connect(timeout=cfg.connect_timeout)
+            t.wait_handshake(timeout=cfg.connect_timeout)
+            mark = t.snapshot()          # ignore handshake-flight bytes
             raw = build_variant(variant, cfg, session_id=session_id)
             t.send(raw)
-            reply = t.recv(timeout=TIMEOUT_JOIN_RESPONSE)
-            outcome, code = None, None
-            if reply:
-                msgs = parse_control_messages(reply)
-                for m in msgs:
-                    if m["msg_type"] == 4:  # Join Response
-                        rc = builders.result_code_of(m)
-                        outcome = Outcome.ANSWERED
-                        code = rc
-                        break
-            if outcome is None:
-                outcome = Outcome.SILENCE if not reply else Outcome.ANSWERED
+            reply = t.recv_since(mark, timeout=TIMEOUT_JOIN_RESPONSE)
+            outcome, code = oracle.classify_reply(reply)
+            if outcome == Outcome.SILENCE and not t.is_alive:
+                # the controller closed the DTLS session right after our send —
+                # an application-layer rejection (alert) rather than silence
+                outcome = Outcome.ALERT
+            if outcome == Outcome.ANSWERED:
+                for m in parse_control_messages(reply):
+                    if m["msg_type"] == 4:
+                        code = builders.result_code_of(m)
             v = RoundVerdict(
                 stage="join", outcome=outcome, result_code=code,
                 mutation={"variant": variant, "round": round_no},
@@ -175,10 +207,19 @@ class JoinStageFuzzer:
             v = RoundVerdict(stage="join", outcome=Outcome.SILENCE,
                              mutation={"variant": variant, "round": round_no,
                                        "transport_error": str(exc)[:200]})
+            if not isinstance(exc, (TimeoutError,)):
+                # surface driver bugs immediately instead of poisoning the run
+                raise
         finally:
             t.close()
             time.sleep(self.cfg.round_gap_s)
         return v
+
+    def _discovery_bytes(self) -> bytes:
+        """Discovery Request prelude (same 5-tuple as the DTLS session)."""
+        from capwap_discovery_fuzzer.vendors.cisco.creator import CiscoPayloadCreator
+        return bytes(CiscoPayloadCreator(identity=self.cfg.identity)
+                     .create_discovery_request(valid=True))
 
     def run(self, variants: list[str], rounds_per_variant: int = 1,
             progress=None) -> dict:
@@ -237,6 +278,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--variants", default="base",
                     help="comma list, or 'all' for the full matrix")
     ap.add_argument("--rounds-per-variant", type=int, default=1)
+    ap.add_argument("--round-gap", type=float, default=1.0,
+                    help="seconds between rounds; the controller keeps a "
+                         "joined session for a while and drops the next join "
+                         "until its cleanup settles")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--openssl", default="openssl")
     args = ap.parse_args(argv)
@@ -251,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = JoinFuzzConfig(ac_addr=(args.ac_ip, args.ac_port),
                          cert_path=args.cert, key_path=args.key,
                          identity=identity, out_dir=out_dir,
-                         local_ip=args.local_ip)
+                         local_ip=args.local_ip, round_gap_s=args.round_gap)
     fuzzer = JoinStageFuzzer(cfg, openssl_bin=args.openssl)
 
     def progress(round_no: int, variant: str, v: RoundVerdict) -> None:

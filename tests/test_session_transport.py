@@ -56,9 +56,14 @@ def s_server(tmp_path):
 def test_connect_send_close(s_server, tmp_path):
     cert, key = _self_signed(tmp_path, "cli")
     t = SClientTransport(("127.0.0.1", s_server), cert_path=cert, key_path=key,
-                         openssl_bin=_openssl())
+                         openssl_bin=_openssl(), handshake_settle=0.3)
     t.connect(timeout=15.0)
     assert t.is_alive
+    # s_server sends nothing on its own; simulate the server flight arriving
+    # (wait_handshake blocks on inbound before the settle window)
+    winger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    winger.sendto(b"flight", ("127.0.0.1", t._wsock.getsockname()[1]))
+    t.wait_handshake(timeout=10.0)
     t.send(bytes(range(48)))          # must not raise
     time.sleep(0.3)
     t.close()

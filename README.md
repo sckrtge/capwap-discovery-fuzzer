@@ -269,6 +269,41 @@ python -m capwap_discovery_fuzzer --ac-ip 192.168.33.134 --vendor cisco \
 
 ---
 
+## Discovery stage mode (stage fuzzer, 2026-09-21) / Discovery 阶段模式
+
+`python -m capwap_discovery_fuzzer.stage_fuzzer` gained a plaintext
+**discovery** stage and it is now the **default**:
+
+- `--stage discovery`（默认）— clear-text UDP on 5246, no DTLS, **no
+  `--cert/--key` needed**; the layered mutation registry from
+  `discovery_stage.py` runs (layers `m1` length-crossings / `m2` fragment
+  fields / `m3` header matrix / `m4` nested TLV & VSP depth / `m5` plaintext
+  channel edges / `m6` element level). Select with `--variants m1,m2` or
+  individual names; `--variants all` = everything including `base`.
+  Record format is the same `session.jsonl` + `summary.json` contract as the
+  session stages (`stage` field = `discovery`), plus a per-reply **canary**
+  check (declared vs actual length — over-read / LEAK suspect flag).
+- **BREAKING**: the old default `--stage join` must now be requested
+  explicitly (`--stage join --cert ... --key ...`); `--cert/--key` are only
+  required for `join|config|change-state`.
+
+```bash
+# Discovery-only, length + fragment layers, fresh identities
+python -m capwap_discovery_fuzzer.stage_fuzzer --ac-ip 192.168.10.201 \
+    --out-dir runs/disc --rounds 30 --variants m1,m2 --identity-pool 6 --seed 20260921
+
+# Old behaviour (DTLS join chain) — explicit stage + certificates
+python -m capwap_discovery_fuzzer.stage_fuzzer --stage join \
+    --cert ~/projects/g05/e2ap4.pem --key ~/projects/g05/e2ap4.key \
+    --out-dir runs/join
+```
+
+Field authority for the mutation layers: workspace doc
+`docs/reference/RFC5415-头部与分片字段表-20260921.md` (RFC 5415 §4.1/§4.3/§4.5.1
+with source line numbers).
+
+---
+
 ## Fuzzing Strategy / 变异策略
 
 Each round constructs one mutated packet. The mutation pipeline has two sequential stages:

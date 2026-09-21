@@ -716,8 +716,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Join-stage CAPWAP session fuzzer (per-round DTLS sessions)")
     ap.add_argument("--ac-ip", default="192.168.10.201")
     ap.add_argument("--ac-port", type=int, default=5246)
-    ap.add_argument("--cert", required=True)
-    ap.add_argument("--key", required=True)
+    ap.add_argument("--cert", default=None)
+    ap.add_argument("--key", default=None)
     ap.add_argument("--model", default="C9105AXI-C")
     ap.add_argument("--local-ip", default="192.168.10.128")
     ap.add_argument("--regdom-config", type=lambda x: int(x, 0),
@@ -726,11 +726,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--variants", default="base",
                     help="comma list, 'all' for the full matrix, or 'unlocked' "
                          "for the random open-element baseline")
-    ap.add_argument("--stage", default="join",
-                    choices=["join", "config", "change-state"],
-                    help="fuzzing stage: the join variants (P4), or a mutated "
-                         "Configuration Status (§8.2) / Change State (§8.6) sent "
-                         "inside a session that joined first (P5)")
+    ap.add_argument("--stage", default="discovery",
+                    choices=["discovery", "join", "config", "change-state"],
+                    help="fuzzing stage: plaintext Discovery (default, no "
+                         "certificate needed), the join variants (P4), or a "
+                         "mutated Configuration Status (§8.2) / Change State "
+                         "(§8.6) sent inside a session that joined first (P5)")
     ap.add_argument("--seed", type=int, default=None,
                     help="RNG seed for the unlocked mode (recorded in summary)")
     ap.add_argument("--rounds", type=int, default=None,
@@ -763,6 +764,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.rounds is not None:
         args.rounds_per_variant = args.rounds
+
+    if args.stage != "discovery" and not (args.cert and args.key):
+        ap.error(f"--stage {args.stage} requires --cert and --key (only the "
+                 "plaintext discovery stage runs without a DTLS identity)")
+
+    if args.stage == "discovery":
+        # D0: plaintext-UDP dispatch; same jsonl/summary contract as the
+        # session stages so cross-stage and cross-vendor runs stay comparable.
+        from capwap_discovery_fuzzer.discovery_stage import (
+            DiscoveryStageFuzzer,
+            expand_variants,
+        )
+        try:
+            variants = expand_variants(args.variants)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
+                              model=args.model.encode())
+        if args.identity_base_mac:
+            mac = bytes.fromhex(args.identity_base_mac)
+            if len(mac) != 6:
+                raise SystemExit("--identity-base-mac must be a 6-byte hex MAC")
+            identity = derive_identity(identity, mac)
+        pool = build_identity_pool(identity, args.identity_pool)
+        fuzzer = DiscoveryStageFuzzer(
+            ac_addr=(args.ac_ip, args.ac_port),
+            out_dir=Path(args.out_dir),
+            identities=pool or (identity,),
+            variants=variants,
+            rounds_per_variant=args.rounds_per_variant,
+            seed=args.seed,
+            response_timeout=args.stage_timeout,
+            round_gap=args.round_gap)
+        summary = fuzzer.run()
+        print(json.dumps(summary, indent=2))
+        return 0
 
     all_for_stage = {"join": ALL_VARIANTS, "config": CONFIG_VARIANTS,
                      "change-state": CHANGE_STATE_VARIANTS}[args.stage]

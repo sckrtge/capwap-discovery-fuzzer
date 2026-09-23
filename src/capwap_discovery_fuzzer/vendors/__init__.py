@@ -17,12 +17,14 @@ from typing import Optional, Type
 from capwap_discovery_fuzzer.capwap_discovery_fuzzer import CAPWAPDiscoveryFuzzer
 from capwap_discovery_fuzzer.vendors.cisco.fuzzer import CiscoCAPWAPDiscoveryFuzzer
 from capwap_discovery_fuzzer.vendors.opencapwap.fuzzer import OpenCAPWAPFuzzer
+from capwap_discovery_fuzzer.vendors.zywall.fuzzer import ZywallCAPWAPDiscoveryFuzzer
 
 #: Vendor name → fuzzer class mapping.
 #: 厂商名称 → fuzzer 类的映射表。
 _VENDOR_MAP: dict[str, Type[CAPWAPDiscoveryFuzzer]] = {
     "opencapwap": OpenCAPWAPFuzzer,
     "cisco":      CiscoCAPWAPDiscoveryFuzzer,
+    "zywall":     ZywallCAPWAPDiscoveryFuzzer,
     "generic":    CAPWAPDiscoveryFuzzer,   # explicit black-box fallback / 显式黑盒降级
 }
 

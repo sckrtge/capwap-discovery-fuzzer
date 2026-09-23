@@ -39,6 +39,7 @@ from typing import Callable
 from capwap_discovery_fuzzer.stage_fuzzer import _element_offsets, _hlen
 from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity, CiscoPayloadCreator
 from capwap_discovery_fuzzer.vendors.cisco.elements import CISCO_VENDOR_ID
+from capwap_discovery_fuzzer.vendors.zywall.creator import ZywallIdentity, ZywallPayloadCreator
 from capwap_discovery_fuzzer.request_creater import Payload_Creator
 
 # --------------------------------------------------------------------------
@@ -506,7 +507,7 @@ class DiscoveryStageFuzzer:
     """Plaintext-UDP Discovery stage runner writing session.jsonl (D0)."""
 
     def __init__(self, ac_addr: tuple[str, int], out_dir: Path,
-                 identities: tuple[ApIdentity, ...], variants: list[str],
+                 identities: tuple, variants: list[str],
                  rounds_per_variant: int, seed: int | None = None,
                  response_timeout: float = 3.0, round_gap: float = 1.0,
                  datagram_gap: float = 0.03):
@@ -521,10 +522,16 @@ class DiscoveryStageFuzzer:
         self.response_timeout = response_timeout
         self.round_gap = round_gap
         self.datagram_gap = datagram_gap
-        self.creators = {i: CiscoPayloadCreator(rng=self.rng, identity=i)
-                         for i in self.identities}
+        # Vendor dispatch: Cisco identities carry board data etc., ZyWALL ones
+        # carry the Max/Used/IANA gates; the seed bytes differ accordingly.
+        self.creators = {}
+        for i in self.identities:
+            if isinstance(i, ZywallIdentity):
+                self.creators[i] = ZywallPayloadCreator(rng=self.rng, identity=i)
+            else:
+                self.creators[i] = CiscoPayloadCreator(rng=self.rng, identity=i)
 
-    def _build_seed(self, identity: ApIdentity) -> bytes:
+    def _build_seed(self, identity) -> bytes:
         return bytes(self.creators[identity].create_discovery_request(valid=True))
 
     def _exchange(self, datagrams: list[bytes]) -> tuple[bytes | None, str]:

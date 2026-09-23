@@ -732,6 +732,11 @@ def main(argv: list[str] | None = None) -> int:
                          "certificate needed), the join variants (P4), or a "
                          "mutated Configuration Status (§8.2) / Change State "
                          "(§8.6) sent inside a session that joined first (P5)")
+    ap.add_argument("--vendor", default="cisco",
+                    choices=["cisco", "zywall"],
+                    help="Discovery-stage seed vendor: cisco (C9800 golden "
+                         "capture form) or zywall (ZyWALL 310 field-table form, "
+                         "HLEN=2 + element 39/37 gates; D4)")
     ap.add_argument("--seed", type=int, default=None,
                     help="RNG seed for the unlocked mode (recorded in summary)")
     ap.add_argument("--rounds", type=int, default=None,
@@ -780,14 +785,34 @@ def main(argv: list[str] | None = None) -> int:
             variants = expand_variants(args.variants)
         except ValueError as exc:
             raise SystemExit(str(exc))
-        identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
-                              model=args.model.encode())
-        if args.identity_base_mac:
-            mac = bytes.fromhex(args.identity_base_mac)
-            if len(mac) != 6:
-                raise SystemExit("--identity-base-mac must be a 6-byte hex MAC")
-            identity = derive_identity(identity, mac)
-        pool = build_identity_pool(identity, args.identity_pool)
+        if args.vendor == "zywall":
+            # ZyWALL 310 (ZLD 4.73): identity = MAC + the four admission-gate
+            # feeders; --model is Cisco-specific and ignored here.
+            from dataclasses import replace as _dc_replace
+            from capwap_discovery_fuzzer.vendors.zywall.creator import ZywallIdentity
+            identity = ZywallIdentity()
+            if args.identity_base_mac:
+                mac = bytes.fromhex(args.identity_base_mac)
+                if len(mac) != 6:
+                    raise SystemExit("--identity-base-mac must be a 6-byte hex MAC")
+                identity = _dc_replace(identity, ap_mac=mac)
+            pool = ()
+            if args.identity_pool > 1:
+                pool = [identity]
+                for i in range(1, args.identity_pool):
+                    mac = bytearray(identity.ap_mac)
+                    mac[-1] = (mac[-1] + i) % 256
+                    pool.append(_dc_replace(identity, ap_mac=bytes(mac)))
+                pool = tuple(pool)
+        else:
+            identity = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
+                                  model=args.model.encode())
+            if args.identity_base_mac:
+                mac = bytes.fromhex(args.identity_base_mac)
+                if len(mac) != 6:
+                    raise SystemExit("--identity-base-mac must be a 6-byte hex MAC")
+                identity = derive_identity(identity, mac)
+            pool = build_identity_pool(identity, args.identity_pool)
         fuzzer = DiscoveryStageFuzzer(
             ac_addr=(args.ac_ip, args.ac_port),
             out_dir=Path(args.out_dir),

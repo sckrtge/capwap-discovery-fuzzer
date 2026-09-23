@@ -485,13 +485,20 @@ def expand_variants(spec: str) -> list[str]:
 # --------------------------------------------------------------------------
 # canary: declared vs actual length (M1's over-read oracle)
 
-def canary_check(raw: bytes) -> dict:
+def canary_check(raw: bytes, len_pad: int = 0) -> dict:
     """Declared-vs-actual length audit for one reply datagram.
 
     expected_total = HLEN*4 + 4(MessageType) + 1(SeqNum) + MsgElemsLen
     (RFC 5415 §4.5.1.3: MsgElemsLen counts from after SeqNum).
     ``extra_bytes > 0`` on a reply ⇒ the responder emitted bytes beyond its
     own declaration — the Heartbleed-style LEAK suspect flag.
+
+    ``len_pad`` calibrates vendor MsgElemsLen semantics: ZyWALL 310
+    (ZLD 4.73) fills MsgElemsLen as the *net* element-area length,
+    excluding the 3-byte Length field itself (measured 2026-09-23: 251B
+    reply with declared 235 = 16+235, RFC wording ⇒ 13+declared), so its
+    replies carry a constant +3 offset — pad=3 zeroes it out and leaves
+    genuine over-emission detectable.
     """
     actual = len(raw)
     if actual < 8:
@@ -500,7 +507,7 @@ def canary_check(raw: bytes) -> dict:
     if actual < hlen + 8:
         return {"parse": "short-header", "actual": actual, "hlen": hlen}
     declared = _get_msgelemslen(raw)
-    expected = hlen + 5 + declared
+    expected = hlen + 5 + declared + len_pad
     return {
         "parse": "ok",
         "msgtype": _get_msgtype(raw),
@@ -534,6 +541,10 @@ class DiscoveryStageFuzzer:
         self.response_timeout = response_timeout
         self.round_gap = round_gap
         self.datagram_gap = datagram_gap
+        # ZyWALL MsgElemsLen excludes the 3-byte Length field itself
+        # (RFC §4.5.1.3 wording includes it; measured +3 on every reply).
+        self.canary_pad = 3 if any(
+            isinstance(i, ZywallIdentity) for i in self.identities) else 0
         # Vendor dispatch: Cisco identities carry board data etc., ZyWALL ones
         # carry the Max/Used/IANA gates; the seed bytes differ accordingly.
         self.creators = {}
@@ -594,7 +605,7 @@ class DiscoveryStageFuzzer:
                     fn = self._builder_for(variant, builder, identity)
                     datagrams, desc = fn(seed, self.rng)
                     reply, addr = self._exchange(datagrams)
-                    canary = canary_check(reply) if reply else None
+                    canary = canary_check(reply, self.canary_pad) if reply else None
                     outcome = "answered" if reply else "silence"
                     stat["rounds"] += 1
                     stat["answered" if reply else "silent"] += 1

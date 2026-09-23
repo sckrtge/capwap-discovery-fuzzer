@@ -235,3 +235,37 @@ class TestM1VendorOverrun:
         assert DiscoveryStageFuzzer._builder_for(
             "base", MUTATORS["base"][1], ZywallIdentity()) \
             is MUTATORS["base"][1]
+
+
+class TestCanaryVendorPad:
+    """ZyWALL fills MsgElemsLen as the net element-area length (counted
+    from after the Flags byte), whereas RFC 5415 Sec 4.5.1.3 wording counts
+    from the Sequence Number (including Len(2)+Flags(1)) and C9800 follows
+    the RFC (D3: extra==0).  In-loop measurement 2026-09-23: 251B Discovery
+    Reply, 2-byte Len at offset 13 reads 235 = 251-16 -> constant +3 under
+    the RFC formula; len_pad=3 zeroes it, keeping over-emission visible."""
+
+    def _reply(self, elems_len):
+        # 8B CAPWAP header + MsgType(4) + Seq(1) + Len(2) + Flags(1) + elements
+        return (bytes.fromhex("0010020000000000")
+                + struct.pack(">I", 2) + bytes([7])
+                + struct.pack(">H", elems_len) + bytes([0])
+                + bytes([66]) * elems_len)
+
+    def test_pad_clears_constant_offset(self):
+        from capwap_discovery_fuzzer.discovery_stage import canary_check
+        raw = self._reply(4)  # total 20, declared 4 (net semantics)
+        plain = canary_check(raw)
+        assert plain["extra_bytes"] == 3 and plain["leak_suspect"] is True
+        padded = canary_check(raw, len_pad=3)
+        assert padded["extra_bytes"] == 0 and padded["leak_suspect"] is False
+        bigger = self._reply(5) + bytes(2)  # genuine 2B over-emission
+        assert canary_check(bigger, len_pad=3)["extra_bytes"] == 2
+
+    def test_measured_wire_shape(self):
+        from capwap_discovery_fuzzer.discovery_stage import canary_check
+        raw = self._reply(235)  # the in-loop measured 251B reply
+        assert len(raw) == 251
+        r = canary_check(raw, len_pad=3)
+        assert r["extra_bytes"] == 0 and r["leak_suspect"] is False
+        assert canary_check(raw)["extra_bytes"] == 3

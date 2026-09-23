@@ -189,12 +189,24 @@ def _m_len_decl_lt(seed: bytes, rng) -> tuple[list[bytes], dict]:
         "op": "len-decl-lt", "old": old, "new": 0, "cite": "RFC5415 §4.5.1.3"}
 
 
-def _m_len_elem_overrun(seed: bytes, rng) -> tuple[list[bytes], dict]:
-    elems = _element_offsets(seed)
-    idx = next(i for i, (t, _s, _l) in enumerate(elems) if t == 38)
-    return [_set_elem_len(seed, idx, 0xFFFF)], {
-        "op": "len-elem-overrun", "elem_type": 38, "new_len": 0xFFFF,
-        "cite": "RFC5415 §4.5.1.5"}
+def _len_elem_overrun(target_type: int):
+    """Factory: overrun the declared length of the vendor's identity element.
+
+    Cisco seeds carry the fingerprint in element 38 (WTP Board Data); ZyWALL
+    seeds carry it in element 39 (WTP Descriptor — modelId/fwVersion gates).
+    """
+    def m(seed: bytes, rng) -> tuple[list[bytes], dict]:
+        elems = _element_offsets(seed)
+        idx = next(i for i, (t, _s, _l) in enumerate(elems)
+                   if t == target_type)
+        return [_set_elem_len(seed, idx, 0xFFFF)], {
+            "op": "len-elem-overrun", "elem_type": target_type,
+            "new_len": 0xFFFF, "cite": "RFC5415 §4.5.1.5"}
+    return m
+
+
+#: registry default: Cisco element 38 (WTP Board Data) — unchanged behavior
+_m_len_elem_overrun = _len_elem_overrun(38)
 
 
 def _m_len_hlen_mismatch(seed: bytes, rng) -> tuple[list[bytes], dict]:
@@ -534,6 +546,15 @@ class DiscoveryStageFuzzer:
     def _build_seed(self, identity) -> bytes:
         return bytes(self.creators[identity].create_discovery_request(valid=True))
 
+    @staticmethod
+    def _builder_for(variant: str, default: "Mutator", identity) -> "Mutator":
+        """Vendor-aware builder: len-elem-overrun targets the identity
+        element of the seed's vendor — 38 (WTP Board Data) for Cisco,
+        39 (WTP Descriptor) for ZyWALL; everything else is vendor-neutral."""
+        if variant == "len-elem-overrun" and isinstance(identity, ZywallIdentity):
+            return _len_elem_overrun(39)
+        return default
+
     def _exchange(self, datagrams: list[bytes]) -> tuple[bytes | None, str]:
         """Send the round's datagrams from a fresh source port; wait once."""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -570,7 +591,8 @@ class DiscoveryStageFuzzer:
                     round_no += 1
                     identity = self.identities[(round_no - 1) % len(self.identities)]
                     seed = self._build_seed(identity)
-                    datagrams, desc = builder(seed, self.rng)
+                    fn = self._builder_for(variant, builder, identity)
+                    datagrams, desc = fn(seed, self.rng)
                     reply, addr = self._exchange(datagrams)
                     canary = canary_check(reply) if reply else None
                     outcome = "answered" if reply else "silence"

@@ -183,3 +183,55 @@ class TestIdentityAndCreator:
             pool.append(replace(base, ap_mac=bytes(mac)))
         assert len({i.ap_mac for i in pool}) == 3
         assert all(i.gates_ok() for i in pool)
+
+
+class TestM1VendorOverrun:
+    """len-elem-overrun vendor extension: ZyWALL seeds target element 39
+    (WTP Descriptor — modelId/fwVersion), Cisco seeds keep element 38
+    (WTP Board Data).  Wire behavior for Cisco is unchanged (regression:
+    tests/test_discovery_stage.py::test_m1_len_elem_overrun)."""
+
+    def _zywall_seed(self) -> bytes:
+        creator = ZywallPayloadCreator(identity=ZywallIdentity())
+        return bytes(creator.create_discovery_request(valid=True))
+
+    def test_overrun_targets_element_39_on_zywall(self):
+        from capwap_discovery_fuzzer.discovery_stage import (
+            MUTATORS,
+            DiscoveryStageFuzzer,
+        )
+        from capwap_discovery_fuzzer.stage_fuzzer import _element_offsets
+        from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity
+
+        seed = self._zywall_seed()
+        ident = ZywallIdentity()
+        default = MUTATORS["len-elem-overrun"][1]
+        builder = DiscoveryStageFuzzer._builder_for(
+            "len-elem-overrun", default, ident)
+        (d,), desc = builder(seed, None)
+        # walk the *unmutated* seed for element 39's offset (same pattern as
+        # the Cisco regression test)
+        t39 = next(s for t, s, l in _element_offsets(seed) if t == 39)
+        assert int.from_bytes(d[t39 + 2:t39 + 4], "big") == 0xFFFF
+        assert len(d) == len(seed)
+        assert desc["elem_type"] == 39
+        # element 37 untouched
+        t37 = next(s for t, s, l in _element_offsets(seed) if t == 37)
+        assert d[t37:t37 + 4] == seed[t37:t37 + 4]
+
+    def test_cisco_identity_keeps_default_builder(self):
+        from capwap_discovery_fuzzer.discovery_stage import (
+            MUTATORS,
+            DiscoveryStageFuzzer,
+        )
+        from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity
+
+        default = MUTATORS["len-elem-overrun"][1]
+        ident = ApIdentity(radios=((0, 0x0D), (1, 0x0A)), num_encrypt=1,
+                           model=b"C9105AXI-C")
+        assert DiscoveryStageFuzzer._builder_for(
+            "len-elem-overrun", default, ident) is default
+        # non-overrun variants are never redirected
+        assert DiscoveryStageFuzzer._builder_for(
+            "base", MUTATORS["base"][1], ZywallIdentity()) \
+            is MUTATORS["base"][1]

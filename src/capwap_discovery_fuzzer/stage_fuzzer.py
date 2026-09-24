@@ -765,6 +765,13 @@ def main(argv: list[str] | None = None) -> int:
                          "seen — the default AP MAC has history by then")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--openssl", default="openssl")
+    ap.add_argument("--probe", dest="probe", action="store_true", default=True,
+                    help="discovery stage: Primary(19) liveness probe after "
+                         "every round; a silent probe right after a live one "
+                         "is recorded as crash_suspect with full evidence "
+                         "(default on)")
+    ap.add_argument("--no-probe", dest="probe", action="store_false",
+                    help="disable the per-round liveness probe (legacy pacing)")
     args = ap.parse_args(argv)
 
     if args.rounds is not None:
@@ -821,7 +828,8 @@ def main(argv: list[str] | None = None) -> int:
             rounds_per_variant=args.rounds_per_variant,
             seed=args.seed,
             response_timeout=args.stage_timeout,
-            round_gap=args.round_gap)
+            round_gap=args.round_gap,
+            probe=args.probe)
         summary = fuzzer.run()
         print(json.dumps(summary, indent=2))
         return 0

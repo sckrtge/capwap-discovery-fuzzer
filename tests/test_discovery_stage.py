@@ -285,7 +285,10 @@ def test_loopback_answered_with_leak_detection(tmp_path):
     fuzzer = DiscoveryStageFuzzer(
         ac_addr=("127.0.0.1", port), out_dir=tmp_path,
         identities=(IDENT,), variants=["base", "len-decl-gt"],
-        rounds_per_variant=1, seed=7, response_timeout=1.0, round_gap=0.0)
+        rounds_per_variant=1, seed=7, response_timeout=1.0, round_gap=0.0,
+        probe=False)  # the blind responder answers the first 2 datagrams; a
+    # per-round probe would steal the second reply (probe-on integration is
+    # covered in test_discovery_inner_mutators.py)
 
     def serve():
         fuzzer_probe = DiscoveryStageFuzzer(
